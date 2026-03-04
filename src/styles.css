@@ -352,6 +352,18 @@ body,
   gap: 8px;
 }
 
+.start-key-list {
+  display: grid;
+  gap: 8px;
+}
+
+.start-key-row {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 8px;
+  align-items: center;
+}
+
 .system-var-row {
   display: grid;
   grid-template-columns: 1fr 1fr auto;
@@ -399,6 +411,10 @@ body,
   }
 
   .system-var-row {
+    grid-template-columns: 1fr;
+  }
+
+  .start-key-row {
     grid-template-columns: 1fr;
   }
 }

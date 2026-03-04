@@ -107,6 +107,17 @@ const defaultSystemVars = Object.entries(defaultSystemConfig?.variables || {}).m
   })
 );
 const createDefaultSystemVars = () => defaultSystemVars.map((item) => ({ ...item }));
+const defaultStartStateKeys = [
+  'user_input',
+  'prompt',
+  'result',
+  'last_agent',
+  'last_llm',
+  'retriever_store_id',
+  'route',
+  'conversation_messages',
+];
+const createDefaultStartStateKeys = () => defaultStartStateKeys.map((key) => ({ key }));
 
 const initialNodes = [
   {
@@ -119,6 +130,7 @@ const initialNodes = [
       label: 'START',
       nodeType: 'start',
       inputKey: 'user_input',
+      startStateKeys: createDefaultStartStateKeys(),
     },
   },
   {
@@ -179,7 +191,6 @@ const getSystemVarValue = (systemNode, key) => {
 };
 
 const END = '__END__';
-
 class BrowserStateGraph {
   constructor() {
     this.nodes = new Map();
@@ -267,8 +278,9 @@ function AgentCanvasNode({ data }) {
       }}
     >
       <Handle id="flow-in" type="target" position={Position.Left} />
-      <Handle id="llm-in" type="target" position={Position.Bottom} style={{ left: '35%' }} />
-      <Handle id="tool-in" type="target" position={Position.Bottom} style={{ left: '70%' }} />
+      <Handle id="llm-in" type="target" position={Position.Bottom} style={{ left: '25%' }} />
+      <Handle id="prompt-in" type="target" position={Position.Bottom} style={{ left: '50%' }} />
+      <Handle id="tool-in" type="target" position={Position.Bottom} style={{ left: '75%' }} />
       <strong>{data?.label || 'Agent'}</strong>
       <div
         style={{
@@ -282,10 +294,13 @@ function AgentCanvasNode({ data }) {
           height: 12,
         }}
       >
-        <span style={{ position: 'absolute', left: '35%', transform: 'translateX(-50%)' }}>
+        <span style={{ position: 'absolute', left: '25%', transform: 'translateX(-50%)' }}>
           LLM
         </span>
-        <span style={{ position: 'absolute', left: '70%', transform: 'translateX(-50%)' }}>
+        <span style={{ position: 'absolute', left: '50%', transform: 'translateX(-50%)' }}>
+          Prompt
+        </span>
+        <span style={{ position: 'absolute', left: '75%', transform: 'translateX(-50%)' }}>
           Tool
         </span>
       </div>
@@ -359,6 +374,24 @@ function ToolCanvasNode({ data }) {
     >
       <strong>{data?.label || 'Tool'}</strong>
       <Handle id="tool-top" type="source" position={Position.Top} />
+    </div>
+  );
+}
+
+function PromptCanvasNode({ data }) {
+  return (
+    <div
+      style={{
+        border: '1px solid #d97706',
+        background: '#fef3c7',
+        borderRadius: 12,
+        minWidth: 160,
+        padding: 10,
+      }}
+    >
+      <Handle id="prompt-in" type="target" position={Position.Left} />
+      <strong>{data?.label || 'Prompt'}</strong>
+      <Handle id="prompt-out" type="source" position={Position.Right} />
     </div>
   );
 }
@@ -463,6 +496,7 @@ function FlowBuilder() {
       startNode: StartCanvasNode,
       llmNode: LlmCanvasNode,
       toolNode: ToolCanvasNode,
+      promptNode: PromptCanvasNode,
       outputNode: OutputCanvasNode,
       groupNode: GroupCanvasNode,
     }),
@@ -521,6 +555,7 @@ function FlowBuilder() {
         paletteNode.type === 'start' ||
         paletteNode.type === 'llm' ||
         paletteNode.type === 'tool' ||
+        paletteNode.type === 'prompt' ||
         paletteNode.type === 'output' ||
         paletteNode.type === 'group'
           ? undefined
@@ -542,8 +577,10 @@ function FlowBuilder() {
                 ? 'startNode'
                 : paletteNode.type === 'llm'
                   ? 'llmNode'
-                : paletteNode.type === 'tool'
+                  : paletteNode.type === 'tool'
                     ? 'toolNode'
+                    : paletteNode.type === 'prompt'
+                      ? 'promptNode'
                     : paletteNode.type === 'output'
                       ? 'outputNode'
                       : paletteNode.type === 'group'
@@ -569,6 +606,7 @@ function FlowBuilder() {
               : undefined,
           branches: paletteNode.type === 'condition' ? paletteNode.branches || 'true\nfalse' : '',
           conditionKind: paletteNode.conditionKind || '',
+          startStateKeys: paletteNode.type === 'start' ? createDefaultStartStateKeys() : [],
           rangeWidth: paletteNode.type === 'group' ? 420 : undefined,
           rangeHeight: paletteNode.type === 'group' ? 240 : undefined,
           onResize:
@@ -686,6 +724,64 @@ function FlowBuilder() {
     },
     [setNodes]
   );
+  const updateStartStateKey = useCallback(
+    (nodeId, index, patch) => {
+      setNodes((nds) =>
+        nds.map((node) => {
+          if (node.id !== nodeId) {
+            return node;
+          }
+          const keys = node.data?.startStateKeys || [];
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              startStateKeys: keys.map((item, i) => (i === index ? { ...item, ...patch } : item)),
+            },
+          };
+        })
+      );
+    },
+    [setNodes]
+  );
+  const addStartStateKey = useCallback(
+    (nodeId) => {
+      setNodes((nds) =>
+        nds.map((node) => {
+          if (node.id !== nodeId) {
+            return node;
+          }
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              startStateKeys: [...(node.data?.startStateKeys || []), { key: '' }],
+            },
+          };
+        })
+      );
+    },
+    [setNodes]
+  );
+  const removeStartStateKey = useCallback(
+    (nodeId, index) => {
+      setNodes((nds) =>
+        nds.map((node) => {
+          if (node.id !== nodeId) {
+            return node;
+          }
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              startStateKeys: (node.data?.startStateKeys || []).filter((_, i) => i !== index),
+            },
+          };
+        })
+      );
+    },
+    [setNodes]
+  );
 
   const isAgentNode = selectedNode?.data?.nodeType === 'agent';
   const isLlmNode = selectedNode?.data?.nodeType === 'llm';
@@ -712,6 +808,41 @@ function FlowBuilder() {
     () => nodes.find((node) => node.data?.nodeType === 'system') || null,
     [nodes]
   );
+  const getStartStateKeysForCode = useCallback(() => {
+    const startNode = nodes.find((node) => node.data?.nodeType === 'start') || null;
+    const configuredKeys = (startNode?.data?.startStateKeys || [])
+      .map((item) => String(item?.key || '').trim())
+      .filter(Boolean);
+    const requiredKeys = [
+      'user_input',
+      'prompt',
+      'result',
+      'last_agent',
+      'last_llm',
+      'retriever_store_id',
+      'route',
+      'conversation_messages',
+      'apiKey',
+      'defaultModel',
+      'systemPrompt',
+    ];
+    return Array.from(new Set(requiredKeys.concat(configuredKeys)));
+  }, [nodes]);
+  const getConfiguredStartStateKeys = useCallback(() => {
+    const startNode = nodes.find((node) => node.data?.nodeType === 'start') || null;
+    return (startNode?.data?.startStateKeys || [])
+      .map((item) => String(item?.key || '').trim())
+      .filter(Boolean);
+  }, [nodes]);
+  const getStartStateDefaultLiteral = useCallback((key, language) => {
+    if (key === 'conversation_messages') {
+      return '[]';
+    }
+    if (key === 'has_system_api_key') {
+      return language === 'python' ? 'False' : 'false';
+    }
+    return "''";
+  }, []);
   const updateGroupRangeSize = useCallback(
     (nodeId, patch) => {
       const nextWidth = Math.max(180, Number(patch?.rangeWidth) || 420);
@@ -944,6 +1075,20 @@ function FlowBuilder() {
       getIncomingNodes(targetNodeId).filter((sourceNode) => sourceNode?.data?.nodeType === 'tool'),
     [getIncomingNodes]
   );
+  const getLinkedPromptNodes = useCallback(
+    (targetNodeId) =>
+      getIncomingNodes(targetNodeId).filter((sourceNode) => sourceNode?.data?.nodeType === 'prompt'),
+    [getIncomingNodes]
+  );
+  const buildAgentSystemPrompt = useCallback(
+    (agentNodeId, basePrompt = '') => {
+      const linkedPromptTexts = getLinkedPromptNodes(agentNodeId)
+        .map((promptNode) => promptNode?.data?.prompt?.trim() || promptNode?.data?.label || '')
+        .filter(Boolean);
+      return [String(basePrompt || '').trim(), ...linkedPromptTexts].filter(Boolean).join('\n\n');
+    },
+    [getLinkedPromptNodes]
+  );
   const resolveApiKey = useCallback(() => {
     const systemNode = findSystemNode();
     const globalApiKeyFromVars = getSystemVarValue(systemNode, 'OPENAI_API_KEY').trim();
@@ -1070,6 +1215,8 @@ function FlowBuilder() {
         nodes[0];
       const entryNode = startNode || nodes.find((node) => !connectedTargets.has(node.id)) || null;
       const entryId = entryNode?.id || '';
+      const stateKeys = getStartStateKeysForCode();
+      const configuredStartKeys = getConfiguredStartStateKeys();
 
       const idToFn = {};
       const functionBlocks = nodes.map((node, index) => {
@@ -1092,10 +1239,15 @@ function FlowBuilder() {
           const linkedLlmModels = getLinkedLlmNodes(node.id).map(
             (llmNode) => llmNode.data?.model || 'gpt-4.1-mini'
           );
+          const linkedPromptTexts = getLinkedPromptNodes(node.id).map(
+            (promptNode) => promptNode.data?.prompt?.trim() || promptNode.data?.label || 'Prompt'
+          );
           const linkedTools = getLinkedToolNodes(node.id).map((toolNode) => toolNode.data?.label || 'Tool');
           return [
             `def ${functionName}(state: State):`,
-            `    system_prompt = ${JSON.stringify(node.data?.agentPrompt || '')}`,
+            `    base_system_prompt = ${JSON.stringify(node.data?.agentPrompt || '')}`,
+            `    linked_prompts = ${JSON.stringify(linkedPromptTexts)}`,
+            "    system_prompt = '\\n\\n'.join([item for item in [base_system_prompt, *linked_prompts] if item])",
             `    llm_models = ${JSON.stringify(linkedLlmModels)}`,
             `    linked_tools = ${JSON.stringify(linkedTools)}`,
             `    retriever_store_ids = ${JSON.stringify(linkedRetrieverStores)}`,
@@ -1150,10 +1302,16 @@ function FlowBuilder() {
         }
 
         if (node.data?.nodeType === 'start') {
+          const startInitPairs = configuredStartKeys.map(
+            (key) => `'${key}': state.get('${key}', ${getStartStateDefaultLiteral(key, 'python')})`
+          );
+          const startReturnExpr = startInitPairs.length
+            ? `{**state, ${startInitPairs.join(', ')}}`
+            : '{**state}';
           return [
             `def ${functionName}(state: State):`,
             "    # Input node: receives message from chat UI",
-            "    return {**state, 'user_input': state.get('user_input', '')}",
+            `    return ${startReturnExpr}`,
             '',
           ].join('\n');
         }
@@ -1234,21 +1392,18 @@ function FlowBuilder() {
 
       const entryFn = entryId && idToFn[entryId] ? idToFn[entryId] : Object.values(idToFn)[0];
       const entryHasOutgoing = entryId ? (outgoingBySource.get(entryId) || []).length > 0 : false;
+      const pythonStateTypeLines = stateKeys.map((key) => `    ${JSON.stringify(key)}: str,`);
 
       return [
         'from typing import TypedDict, Optional',
         'from langchain.agents import create_agent',
         'from langgraph.graph import StateGraph, END',
         '',
-        'class State(TypedDict, total=False):',
-        '    user_input: str',
-        '    prompt: str',
-        '    result: str',
-        '    last_agent: str',
-        '    last_llm: str',
-        '    system_api_key: str',
-        '    has_system_api_key: bool',
-        '    retriever_store_id: str',
+        "State = TypedDict('State', {",
+        ...pythonStateTypeLines,
+        "    'system_api_key': str,",
+        "    'has_system_api_key': bool,",
+        '}, total=False)',
         '',
         ...functionBlocks,
         'graph = StateGraph(State)',
@@ -1264,7 +1419,17 @@ function FlowBuilder() {
         .filter(Boolean)
         .join('\n');
     },
-    [nodes, edges, getLinkedRetrieverStoreIds, getLinkedLlmNodes, getLinkedToolNodes]
+    [
+      nodes,
+      edges,
+      getLinkedRetrieverStoreIds,
+      getLinkedLlmNodes,
+      getLinkedPromptNodes,
+      getLinkedToolNodes,
+      getStartStateKeysForCode,
+      getConfiguredStartStateKeys,
+      getStartStateDefaultLiteral,
+    ]
   );
 
   const generateLangGraphJsCode = useCallback(
@@ -1288,6 +1453,8 @@ function FlowBuilder() {
         nodes[0];
       const entryNode = startNode || nodes.find((node) => !connectedTargets.has(node.id)) || null;
       const entryId = entryNode?.id || '';
+      const stateKeys = getStartStateKeysForCode();
+      const configuredStartKeys = getConfiguredStartStateKeys();
 
       const idToFn = {};
       const functionBlocks = nodes.map((node, index) => {
@@ -1311,10 +1478,15 @@ function FlowBuilder() {
           const linkedLlmModels = getLinkedLlmNodes(node.id).map(
             (llmNode) => llmNode.data?.model || 'gpt-4.1-mini'
           );
+          const linkedPromptTexts = getLinkedPromptNodes(node.id).map(
+            (promptNode) => promptNode.data?.prompt?.trim() || promptNode.data?.label || 'Prompt'
+          );
           const linkedTools = getLinkedToolNodes(node.id).map((toolNode) => toolNode.data?.label || 'Tool');
           return [
             `const ${functionName} = async (state) => {`,
-            `  const systemPrompt = ${JSON.stringify(node.data?.agentPrompt || '')};`,
+            `  const baseSystemPrompt = ${JSON.stringify(node.data?.agentPrompt || '')};`,
+            `  const linkedPrompts = ${JSON.stringify(linkedPromptTexts)};`,
+            '  const systemPrompt = [baseSystemPrompt, ...linkedPrompts].filter(Boolean).join("\\n\\n");',
             `  const llmModels = ${JSON.stringify(linkedLlmModels)};`,
             `  const linkedTools = ${JSON.stringify(linkedTools)};`,
             `  const retrieverStoreIds = ${JSON.stringify(linkedRetrieverStores)};`,
@@ -1398,9 +1570,15 @@ function FlowBuilder() {
         }
 
         if (node.data?.nodeType === 'start') {
+          const startInitProps = configuredStartKeys.map(
+            (key) => `'${key}': state['${key}'] ?? ${getStartStateDefaultLiteral(key, 'js')}`
+          );
+          const startReturnExpr = startInitProps.length
+            ? `{ ...state, ${startInitProps.join(', ')} }`
+            : '{ ...state }';
           return [
             `const ${functionName} = async (state) => {`,
-            "  return { ...state, user_input: state.user_input || '' };",
+            `  return ${startReturnExpr};`,
             '};',
             '',
           ].join('\n');
@@ -1457,10 +1635,16 @@ function FlowBuilder() {
         .join('\n');
 
       const entryFn = entryId && idToFn[entryId] ? idToFn[entryId] : Object.values(idToFn)[0];
+      const jsStatePropertyLines = stateKeys.map((key) => ` * @property {any} ${key}`);
       return [
         '// Runtime-provided: StateGraph, END, runModel, createAgent',
         '',
-        '/** @typedef {{ user_input?: string, prompt?: string, result?: string, last_agent?: string, last_llm?: string, retriever_store_id?: string, route?: string, conversation_messages?: Array<{ role: string, content: string }> }} State */',
+        '/**',
+        ' * @typedef {Object} State',
+        ...jsStatePropertyLines,
+        ' * @property {string=} system_api_key',
+        ' * @property {boolean=} has_system_api_key',
+        ' */',
         '',
         'const getAgentResultText = (result) => {',
         '  if (!result) return "";',
@@ -1497,7 +1681,17 @@ function FlowBuilder() {
         .filter(Boolean)
         .join('\n');
     },
-    [nodes, edges, getLinkedRetrieverStoreIds, getLinkedLlmNodes, getLinkedToolNodes]
+    [
+      nodes,
+      edges,
+      getLinkedRetrieverStoreIds,
+      getLinkedLlmNodes,
+      getLinkedPromptNodes,
+      getLinkedToolNodes,
+      getStartStateKeysForCode,
+      getConfiguredStartStateKeys,
+      getStartStateDefaultLiteral,
+    ]
   );
 
   const extractFlowContext = useCallback(
@@ -1627,7 +1821,7 @@ function FlowBuilder() {
       .concat({ role: 'user', content: userMessage });
 
     try {
-      const context = extractFlowContext(startInputForPreview?.id || startAgent.id);
+      const startAgentSystemPrompt = buildAgentSystemPrompt(startAgent.id, startAgent.data?.agentPrompt || '');
       const systemNode = findSystemNode();
       const globalApiKeyFromVars = getSystemVarValue(systemNode, 'OPENAI_API_KEY').trim();
       const linkedLlmNodes = getLinkedLlmNodes(startAgent.id);
@@ -1839,22 +2033,13 @@ function FlowBuilder() {
         user_input: userMessage,
         apiKey,
         defaultModel: model,
-        systemPrompt: startAgent.data?.agentPrompt || '',
+        systemPrompt: startAgentSystemPrompt,
         conversation_messages: conversationMessages,
       });
 
-      assistantText = finalState?.result || '';
-
+      assistantText = String(finalState?.result || '').trim();
       if (!assistantText) {
-        const firstPrompt = context.prompts[0] || startAgent.data?.agentPrompt || '';
-        const outputLabel = context.outputs[0] || '';
-        assistantText = [
-          firstPrompt ? `提示詞內容：${firstPrompt}` : '',
-          `我收到你的訊息：「${userMessage}」`,
-          outputLabel ? `流程輸出節點：${outputLabel}` : '',
-        ]
-          .filter(Boolean)
-          .join('\n');
+        throw new Error('未取得語言模型回覆。請確認 API Key、模型設定與節點連線。');
       }
 
       setChatHistory((prev) => prev.concat({ role: 'assistant', text: assistantText }));
@@ -1870,9 +2055,9 @@ function FlowBuilder() {
     validateRunnableFlow,
     showRunnerError,
     findStartAgent,
+    buildAgentSystemPrompt,
     findSystemNode,
     getLinkedLlmNodes,
-    extractFlowContext,
     generateLangGraphCode,
     generateLangGraphJsCode,
     getResponseText,
@@ -2066,10 +2251,41 @@ function FlowBuilder() {
             </label>
 
             {isStartNode && (
-              <p className="settings-note">
-                固定 START 節點：接收測試聊天機器人的輸入訊息，變數為{' '}
-                <code>{selectedNode.data?.inputKey || 'user_input'}</code>.
-              </p>
+              <>
+                <p className="settings-note">
+                  固定 START 節點：接收測試聊天機器人的輸入訊息，變數為{' '}
+                  <code>{selectedNode.data?.inputKey || 'user_input'}</code>。
+                </p>
+                <p className="settings-note">State Keys</p>
+                <div className="start-key-list">
+                  {(selectedNode.data?.startStateKeys || []).map((item, index) => (
+                    <div key={`start-key-${index}`} className="start-key-row">
+                      <input
+                        type="text"
+                        placeholder="state key"
+                        value={item.key || ''}
+                        onChange={(event) =>
+                          updateStartStateKey(selectedNode.id, index, { key: event.target.value })
+                        }
+                      />
+                      <button
+                        type="button"
+                        className="system-var-remove"
+                        onClick={() => removeStartStateKey(selectedNode.id, index)}
+                      >
+                        移除
+                      </button>
+                    </div>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="system-var-add"
+                  onClick={() => addStartStateKey(selectedNode.id)}
+                >
+                  + 新增 Key
+                </button>
+              </>
             )}
 
             {isSystemNode && (
@@ -2135,6 +2351,13 @@ function FlowBuilder() {
                   已連接 Retriever：{' '}
                   {getLinkedRetrieverStoreIds(selectedNode.id).join(', ') || '無'}
                 </p>
+                <p className="settings-note">
+                  已連接 Prompt：{' '}
+                  {getLinkedPromptNodes(selectedNode.id)
+                    .map((node) => node.data?.label || 'Prompt')
+                    .join(', ') || '無'}
+                </p>
+                <p className="settings-note">執行時會合併「Agent 提示詞」與已連接 Prompt 的文字內容。</p>
 
                 <label>
                   Agent 提示詞
