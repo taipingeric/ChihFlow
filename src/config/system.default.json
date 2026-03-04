@@ -1,6 +1,6 @@
 {
   "variables": {
-    "OPENAI_API_KEY": "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",
+    "OPENAI_API_KEY": "",
     "OPENAI_BASE_URL": "",
     "OPENAI_MODEL": "gpt-4.1-mini"
   }
