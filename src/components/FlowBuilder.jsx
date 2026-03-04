@@ -16,44 +16,50 @@ const nodePalette = [
   {
     type: 'agent',
     label: 'Agent',
-    description: 'LLM or role-based worker',
-    color: '#f6d8ae',
+    description: '智慧代理節點',
+    color: '#aef6d8',
   },
   {
     type: 'llm',
     label: 'LLM',
-    description: 'Standalone model call',
+    description: '核心語言模型',
     color: '#fee2e2',
   },
   {
     type: 'system',
     label: 'System',
-    description: 'Global variables/config',
+    description: '全域變數與設定',
     color: '#ddd6fe',
   },
   {
     type: 'tool',
     label: 'Tool',
-    description: 'Choose tool type',
+    description: '工具類型',
     color: '#cce3f7',
   },
   {
     type: 'condition',
     label: 'Condition',
-    description: 'Choose condition type',
+    description: '選擇條件分支類型',
     color: '#d7f7cc',
   },
   {
     type: 'prompt',
     label: 'Prompt',
-    description: 'Instruction template',
+    description: '指令模板',
     color: '#fde68a',
   },
   {
     type: 'output',
     label: 'Output',
-    description: 'Final result',
+    description: '最終輸出結果',
     color: '#f8d1e3',
+  },
+  {
+    type: 'group',
+    label: 'Group',
+    description: '範圍群組與同步拖移',
+    color: '#e5e7eb',
   },
 ];
 
@@ -62,19 +68,19 @@ const conditionTemplates = [
   {
     id: 'bool_check',
     label: 'IF',
-    description: 'Branch true/false',
+    description: 'True / False 分支',
     branches: 'true\nfalse',
   },
   {
     id: 'intent_router',
     label: 'Intent Router',
-    description: 'Route by user intent',
+    description: '依使用者意圖分流',
     branches: 'sales\nsupport\ngeneral',
   },
   {
     id: 'confidence_gate',
     label: 'Confidence Gate',
-    description: 'High vs low confidence',
+    description: '高 / 低信心分流',
     branches: 'high\nlow',
   },
 ];
@@ -82,7 +88,7 @@ const toolTemplates = [
   {
     id: 'retriever',
     label: 'Retriever',
-    description: 'PDF search via vector store',
+    description: '透過向量資料庫搜尋 PDF',
     toolKind: 'retriever',
   },
 ];
@@ -117,14 +123,15 @@ const initialNodes = [
   },
   {
     id: '2',
-    type: 'llmNode',
+    type: 'agentNode',
     position: { x: 460, y: 100 },
     data: {
-      label: 'LLM',
-      nodeType: 'llm',
+      label: 'Agent',
+      nodeType: 'agent',
       provider: 'openai',
       model: 'gpt-4.1-mini',
       apiKey: '',
+      agentPrompt: 'You are a helpful assistant.',
     },
   },
   {
@@ -373,6 +380,68 @@ function OutputCanvasNode({ data }) {
   );
 }
 
+function GroupCanvasNode({ data }) {
+  const width = Number(data?.rangeWidth) > 0 ? Number(data.rangeWidth) : 420;
+  const height = Number(data?.rangeHeight) > 0 ? Number(data.rangeHeight) : 240;
+  const onResizeHandleMouseDown = (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startWidth = width;
+    const startHeight = height;
+
+    const onMouseMove = (moveEvent) => {
+      const nextWidth = Math.max(180, startWidth + (moveEvent.clientX - startX));
+      const nextHeight = Math.max(120, startHeight + (moveEvent.clientY - startY));
+      data?.onResize?.(nextWidth, nextHeight);
+    };
+
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  };
+
+  return (
+    <div
+      style={{
+        width,
+        height,
+        border: '2px dashed #9ca3af',
+        background: 'rgba(161, 161, 170, 0.06)',
+        borderRadius: 12,
+        padding: 10,
+        color: '#3f3f46',
+        fontWeight: 600,
+        position: 'relative',
+      }}
+    >
+      {data?.label || 'Group'}
+      <div
+        role="button"
+        aria-label="調整群組範圍大小"
+        onMouseDown={onResizeHandleMouseDown}
+        style={{
+          position: 'absolute',
+          width: 14,
+          height: 14,
+          right: 6,
+          bottom: 6,
+          borderRadius: 4,
+          border: '1px solid #6b7280',
+          background: '#e5e7eb',
+          cursor: 'nwse-resize',
+        }}
+      />
+    </div>
+  );
+}
+
 function FlowBuilder() {
   const wrapperRef = useRef(null);
   const [reactFlowInstance, setReactFlowInstance] = useState(null);
@@ -384,6 +453,7 @@ function FlowBuilder() {
   const [chatHistory, setChatHistory] = useState([]);
   const [isRunning, setIsRunning] = useState(false);
   const [runnerError, setRunnerError] = useState('');
+  const [errorDialogMessage, setErrorDialogMessage] = useState('');
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
   const nodeTypes = useMemo(
@@ -394,6 +464,7 @@ function FlowBuilder() {
       llmNode: LlmCanvasNode,
       toolNode: ToolCanvasNode,
       outputNode: OutputCanvasNode,
+      groupNode: GroupCanvasNode,
     }),
     []
   );
@@ -450,7 +521,8 @@ function FlowBuilder() {
         paletteNode.type === 'start' ||
         paletteNode.type === 'llm' ||
         paletteNode.type === 'tool' ||
-        paletteNode.type === 'output'
+        paletteNode.type === 'output' ||
+        paletteNode.type === 'group'
           ? undefined
           : {
               borderRadius: 12,
@@ -470,10 +542,12 @@ function FlowBuilder() {
                 ? 'startNode'
                 : paletteNode.type === 'llm'
                   ? 'llmNode'
-                  : paletteNode.type === 'tool'
+                : paletteNode.type === 'tool'
                     ? 'toolNode'
                     : paletteNode.type === 'output'
                       ? 'outputNode'
+                      : paletteNode.type === 'group'
+                        ? 'groupNode'
               : 'default',
         position,
         data: {
@@ -495,6 +569,33 @@ function FlowBuilder() {
               : undefined,
           branches: paletteNode.type === 'condition' ? paletteNode.branches || 'true\nfalse' : '',
           conditionKind: paletteNode.conditionKind || '',
+          rangeWidth: paletteNode.type === 'group' ? 420 : undefined,
+          rangeHeight: paletteNode.type === 'group' ? 240 : undefined,
+          onResize:
+            paletteNode.type === 'group'
+              ? (nextWidth, nextHeight) => {
+                  setNodes((nds) =>
+                    nds.map((node) => {
+                      if (node.id !== id) {
+                        return node;
+                      }
+                      return {
+                        ...node,
+                        data: {
+                          ...node.data,
+                          rangeWidth: nextWidth,
+                          rangeHeight: nextHeight,
+                        },
+                        style: {
+                          ...(node.style || {}),
+                          width: nextWidth,
+                          height: nextHeight,
+                        },
+                      };
+                    })
+                  );
+                }
+              : undefined,
         },
         style: wrapperStyle,
       };
@@ -593,6 +694,7 @@ function FlowBuilder() {
   const isStartNode = selectedNode?.data?.nodeType === 'start';
   const isConditionNode = selectedNode?.data?.nodeType === 'condition';
   const isSystemNode = selectedNode?.data?.nodeType === 'system';
+  const isGroupNode = selectedNode?.data?.nodeType === 'group';
 
   const findStartAgent = useCallback(() => {
     const selectedNode = nodes.find((node) => node.id === selectedNodeId);
@@ -610,6 +712,205 @@ function FlowBuilder() {
     () => nodes.find((node) => node.data?.nodeType === 'system') || null,
     [nodes]
   );
+  const updateGroupRangeSize = useCallback(
+    (nodeId, patch) => {
+      const nextWidth = Math.max(180, Number(patch?.rangeWidth) || 420);
+      const nextHeight = Math.max(120, Number(patch?.rangeHeight) || 240);
+      setNodes((nds) =>
+        nds.map((node) => {
+          if (node.id !== nodeId) {
+            return node;
+          }
+          return {
+            ...node,
+            data: {
+              ...node.data,
+              rangeWidth: nextWidth,
+              rangeHeight: nextHeight,
+            },
+            style: {
+              ...(node.style || {}),
+              width: nextWidth,
+              height: nextHeight,
+            },
+          };
+        })
+      );
+    },
+    [setNodes]
+  );
+  const attachNodesIntoGroupRange = useCallback(
+    (groupNodeId) => {
+      setNodes((nds) => {
+        const nodeMap = new Map(nds.map((node) => [node.id, node]));
+        const groupNode = nodeMap.get(groupNodeId);
+        if (!groupNode) {
+          return nds;
+        }
+
+        const width = Number(groupNode.data?.rangeWidth) > 0 ? Number(groupNode.data.rangeWidth) : 420;
+        const height = Number(groupNode.data?.rangeHeight) > 0 ? Number(groupNode.data.rangeHeight) : 240;
+        const getAbsolutePosition = (node) => {
+          let x = Number(node?.position?.x || 0);
+          let y = Number(node?.position?.y || 0);
+          let parentId = node?.parentNode;
+
+          while (parentId) {
+            const parentNode = nodeMap.get(parentId);
+            if (!parentNode) {
+              break;
+            }
+            x += Number(parentNode.position?.x || 0);
+            y += Number(parentNode.position?.y || 0);
+            parentId = parentNode.parentNode;
+          }
+
+          return { x, y };
+        };
+        const getNodeSize = (node) => {
+          const defaultSizeByType = {
+            start: { width: 150, height: 48 },
+            agent: { width: 190, height: 72 },
+            llm: { width: 150, height: 48 },
+            tool: { width: 150, height: 48 },
+            output: { width: 150, height: 48 },
+            system: { width: 170, height: 66 },
+            condition: { width: 150, height: 60 },
+            prompt: { width: 150, height: 60 },
+          };
+          const fallback = defaultSizeByType[node?.data?.nodeType] || { width: 150, height: 60 };
+          const rawWidth =
+            Number(node?.width) || Number(node?.style?.width) || Number(node?.data?.rangeWidth) || fallback.width;
+          const rawHeight =
+            Number(node?.height) || Number(node?.style?.height) || Number(node?.data?.rangeHeight) || fallback.height;
+          return { width: rawWidth, height: rawHeight };
+        };
+
+        const rangeTopLeft = getAbsolutePosition(groupNode);
+        const rangeRight = rangeTopLeft.x + width;
+        const rangeBottom = rangeTopLeft.y + height;
+
+        return nds.map((node) => {
+          if (node.id === groupNodeId || node.data?.nodeType === 'group') {
+            return node;
+          }
+
+          const abs = getAbsolutePosition(node);
+          const size = getNodeSize(node);
+          const inRange =
+            abs.x >= rangeTopLeft.x &&
+            abs.y >= rangeTopLeft.y &&
+            abs.x + size.width <= rangeRight &&
+            abs.y + size.height <= rangeBottom;
+
+          if (!inRange) {
+            return node;
+          }
+
+          return {
+            ...node,
+            parentNode: groupNodeId,
+            extent: 'parent',
+            position: {
+              x: abs.x - rangeTopLeft.x,
+              y: abs.y - rangeTopLeft.y,
+            },
+          };
+        });
+      });
+    },
+    [setNodes]
+  );
+  const detachNodesFromGroupRange = useCallback(
+    (groupNodeId) => {
+      setNodes((nds) => {
+        const nodeMap = new Map(nds.map((node) => [node.id, node]));
+        const groupNode = nodeMap.get(groupNodeId);
+        if (!groupNode) {
+          return nds;
+        }
+
+        const groupAbsX = Number(groupNode.position?.x || 0);
+        const groupAbsY = Number(groupNode.position?.y || 0);
+
+        return nds.map((node) => {
+          if (node.parentNode !== groupNodeId) {
+            return node;
+          }
+          return {
+            ...node,
+            parentNode: undefined,
+            extent: undefined,
+            position: {
+              x: groupAbsX + Number(node.position?.x || 0),
+              y: groupAbsY + Number(node.position?.y || 0),
+            },
+          };
+        });
+      });
+    },
+    [setNodes]
+  );
+  const validateRunnableFlow = useCallback(() => {
+    const startNode = nodes.find((node) => node.data?.nodeType === 'start');
+    if (!startNode) {
+      return '缺少 START 節點。';
+    }
+
+    const outputNode = nodes.find((node) => node.data?.nodeType === 'output');
+    if (!outputNode) {
+      return '缺少 Output 節點。';
+    }
+
+    const adjacency = new Map();
+    edges.forEach((edge) => {
+      if (!adjacency.has(edge.source)) {
+        adjacency.set(edge.source, []);
+      }
+      adjacency.get(edge.source).push(edge.target);
+    });
+
+    const stack = [startNode.id];
+    const visited = new Set();
+
+    while (stack.length > 0) {
+      const nodeId = stack.pop();
+      if (visited.has(nodeId)) {
+        continue;
+      }
+      visited.add(nodeId);
+
+      if (nodeId === outputNode.id) {
+        return '';
+      }
+
+      const nextIds = adjacency.get(nodeId) || [];
+      for (let i = nextIds.length - 1; i >= 0; i -= 1) {
+        stack.push(nextIds[i]);
+      }
+    }
+
+    return '執行前需有完整路徑：START -> ... -> Output。';
+  }, [nodes, edges]);
+  const normalizeErrorMessage = useCallback((errorLike, fallbackMessage) => {
+    const fallback = fallbackMessage || '流程執行失敗。';
+    const raw = String(errorLike?.message || errorLike || '').trim();
+    if (!raw) {
+      return fallback;
+    }
+
+    const lowered = raw.toLowerCase();
+    if (lowered.includes('failed to fetch') || lowered.includes('networkerror')) {
+      return '網路連線失敗，無法連線到服務。請檢查網路、API 位址與瀏覽器設定後再試一次。';
+    }
+
+    return raw;
+  }, []);
+  const showRunnerError = useCallback((message) => {
+    const text = normalizeErrorMessage(message, '流程執行失敗。');
+    setRunnerError(text);
+    setErrorDialogMessage(text);
+  }, [normalizeErrorMessage]);
   const getIncomingNodes = useCallback(
     (targetNodeId) => {
       const nodeMap = new Map(nodes.map((node) => [node.id, node]));
@@ -666,7 +967,7 @@ function FlowBuilder() {
         updateNodeData(nodeId, {
           retriever: {
             ...(nodes.find((node) => node.id === nodeId)?.data?.retriever || defaultRetrieverConfig),
-            error: 'Missing API key. Set OPENAI_API_KEY in System node or agent key.',
+            error: '缺少 API Key。請在 System 的 OPENAI_API_KEY 或 Agent 節點中設定。',
           },
         });
         return;
@@ -676,7 +977,7 @@ function FlowBuilder() {
       updateNodeData(nodeId, {
         retriever: {
           ...baseRetriever,
-          status: 'Uploading PDF...',
+          status: 'PDF 上傳中...',
           error: '',
         },
       });
@@ -692,7 +993,7 @@ function FlowBuilder() {
           body: fileData,
         });
         if (!fileRes.ok) {
-          throw new Error(`File upload failed (${fileRes.status})`);
+          throw new Error(`檔案上傳失敗（${fileRes.status}）`);
         }
         const filePayload = await fileRes.json();
 
@@ -707,7 +1008,7 @@ function FlowBuilder() {
           }),
         });
         if (!storeRes.ok) {
-          throw new Error(`Vector store creation failed (${storeRes.status})`);
+          throw new Error(`建立向量資料庫失敗（${storeRes.status}）`);
         }
         const storePayload = await storeRes.json();
 
@@ -723,7 +1024,7 @@ function FlowBuilder() {
           }
         );
         if (!attachRes.ok) {
-          throw new Error(`Attach file failed (${attachRes.status})`);
+          throw new Error(`向量資料庫附加檔案失敗（${attachRes.status}）`);
         }
 
         updateNodeData(nodeId, {
@@ -731,7 +1032,7 @@ function FlowBuilder() {
             ...baseRetriever,
             vectorStoreId: storePayload.id,
             lastFileName: file.name,
-            status: 'Vector store ready.',
+            status: '向量資料庫已就緒。',
             error: '',
           },
         });
@@ -740,12 +1041,12 @@ function FlowBuilder() {
           retriever: {
             ...baseRetriever,
             status: '',
-            error: error.message || 'Failed to upload PDF to vector store.',
+            error: normalizeErrorMessage(error, 'PDF 上傳到向量資料庫失敗。'),
           },
         });
       }
     },
-    [nodes, resolveApiKey, updateNodeData]
+    [nodes, normalizeErrorMessage, resolveApiKey, updateNodeData]
   );
 
   const generateLangGraphCode = useCallback(
@@ -1300,13 +1601,20 @@ function FlowBuilder() {
       return;
     }
 
+    const flowValidationError = validateRunnableFlow();
+    if (flowValidationError) {
+      showRunnerError(flowValidationError);
+      return;
+    }
+
     const startAgent = findStartAgent();
     if (!startAgent) {
-      setRunnerError('Add at least one Agent node before running the flow.');
+      showRunnerError('請至少新增一個 Agent 節點後再執行流程。');
       return;
     }
 
     setRunnerError('');
+    setErrorDialogMessage('');
     setIsRunning(true);
     setChatInput('');
     setChatHistory((prev) => prev.concat({ role: 'user', text: userMessage }));
@@ -1541,9 +1849,9 @@ function FlowBuilder() {
         const firstPrompt = context.prompts[0] || startAgent.data?.agentPrompt || '';
         const outputLabel = context.outputs[0] || '';
         assistantText = [
-          firstPrompt ? `Prompt context: ${firstPrompt}` : '',
-          `I received your message: "${userMessage}"`,
-          outputLabel ? `Flow output node: ${outputLabel}` : '',
+          firstPrompt ? `提示詞內容：${firstPrompt}` : '',
+          `我收到你的訊息：「${userMessage}」`,
+          outputLabel ? `流程輸出節點：${outputLabel}` : '',
         ]
           .filter(Boolean)
           .join('\n');
@@ -1551,7 +1859,7 @@ function FlowBuilder() {
 
       setChatHistory((prev) => prev.concat({ role: 'assistant', text: assistantText }));
     } catch (error) {
-      setRunnerError(error.message || 'Failed to run flow.');
+      showRunnerError(error);
     } finally {
       setIsRunning(false);
     }
@@ -1559,6 +1867,8 @@ function FlowBuilder() {
     chatInput,
     chatHistory,
     isRunning,
+    validateRunnableFlow,
+    showRunnerError,
     findStartAgent,
     findSystemNode,
     getLinkedLlmNodes,
@@ -1573,7 +1883,7 @@ function FlowBuilder() {
     <div className="builder-layout">
       <aside className="sidebar">
         <h1>ChihFlow</h1>
-        <p>Drag blocks into the canvas to build your agent flow.</p>
+        <p>把節點拖曳到畫布上，建立你的 Agent 流程。</p>
         <div className="node-palette">
           {nodePalette.map((node) =>
             node.type === 'condition' ? (
@@ -1663,8 +1973,8 @@ function FlowBuilder() {
         </div>
 
         <div className="runner-panel">
-          <h2>Test Chatbot</h2>
-          <p className="code-caption">Generated LangGraph Code</p>
+          <h2>測試聊天機器人</h2>
+          <p className="code-caption">產生的 LangGraph 程式碼</p>
           <div className="code-tabs">
             <button
               type="button"
@@ -1684,28 +1994,28 @@ function FlowBuilder() {
           <pre className="langgraph-code">{codeTab === 'js' ? langGraphJsCode : langGraphPythonCode}</pre>
           <div className="chat-messages">
             {chatHistory.length === 0 && (
-              <p className="chat-empty">No messages yet. Enter input and run the flow.</p>
+              <p className="chat-empty">目前沒有訊息。輸入內容後執行流程。</p>
             )}
             {chatHistory.map((message, index) => (
               <div
                 key={`${message.role}-${index}`}
                 className={`chat-message ${message.role === 'user' ? 'chat-user' : 'chat-assistant'}`}
               >
-                <strong>{message.role === 'user' ? 'You' : 'Bot'}:</strong> {message.text}
+                <strong>{message.role === 'user' ? '你' : '機器人'}:</strong> {message.text}
               </div>
             ))}
           </div>
           <label>
-            Message
+            訊息
             <textarea
               rows={3}
               value={chatInput}
               onChange={(event) => setChatInput(event.target.value)}
-              placeholder="Type a test message for your agent flow..."
+              placeholder="輸入要測試流程的訊息..."
             />
           </label>
           <button type="button" className="run-button" onClick={onRunFlow} disabled={isRunning}>
-            {isRunning ? 'Running...' : 'Run Flow'}
+            {isRunning ? '執行中...' : '執行流程'}
           </button>
           {runnerError && <p className="runner-error">{runnerError}</p>}
         </div>
@@ -1733,14 +2043,14 @@ function FlowBuilder() {
       </main>
 
       <aside className="settings-panel">
-        <h2>Node Settings</h2>
+        <h2>節點設定</h2>
 
-        {!selectedNode && <p>Select a node to configure it.</p>}
+        {!selectedNode && <p>請先選擇一個節點進行設定。</p>}
 
         {selectedNode && (
           <div className="settings-fields">
             <label>
-              Node name
+              節點名稱
               <input
                 type="text"
                 value={selectedNode.data?.label || ''}
@@ -1751,20 +2061,20 @@ function FlowBuilder() {
             </label>
 
             <label>
-              Node type
+              節點類型
               <input type="text" value={selectedNode.data?.nodeType || ''} readOnly />
             </label>
 
             {isStartNode && (
               <p className="settings-note">
-                Fixed START node: receives the input message from Test Chatbot as{' '}
+                固定 START 節點：接收測試聊天機器人的輸入訊息，變數為{' '}
                 <code>{selectedNode.data?.inputKey || 'user_input'}</code>.
               </p>
             )}
 
             {isSystemNode && (
               <>
-                <p className="settings-note">System Variables (key-value)</p>
+                <p className="settings-note">System 變數（key-value）</p>
                 <div className="system-var-list">
                   {(selectedNode.data?.systemVars || []).map((item, index) => (
                     <div key={`sys-var-${index}`} className="system-var-row">
@@ -1789,7 +2099,7 @@ function FlowBuilder() {
                         className="system-var-remove"
                         onClick={() => removeSystemVar(selectedNode.id, index)}
                       >
-                        Remove
+                        移除
                       </button>
                     </div>
                   ))}
@@ -1799,10 +2109,10 @@ function FlowBuilder() {
                   className="system-var-add"
                   onClick={() => addSystemVar(selectedNode.id)}
                 >
-                  + Add Variable
+                  + 新增變數
                 </button>
                 <p className="settings-note">
-                  Use <code>OPENAI_API_KEY</code> for global OpenAI key. Agent local key still overrides.
+                  可使用 <code>OPENAI_API_KEY</code> 設定全域 OpenAI 金鑰，Agent 仍可用自身金鑰覆蓋。
                 </p>
               </>
             )}
@@ -1810,27 +2120,27 @@ function FlowBuilder() {
             {isAgentNode && (
               <>
                 <p className="settings-note">
-                  Linked LLM models:{' '}
+                  已連接 LLM 模型：{' '}
                   {getLinkedLlmNodes(selectedNode.id)
                     .map((node) => node.data?.model || 'gpt-4.1-mini')
-                    .join(', ') || 'none'}
+                    .join(', ') || '無'}
                 </p>
                 <p className="settings-note">
-                  Linked tools:{' '}
+                  已連接工具：{' '}
                   {getLinkedToolNodes(selectedNode.id)
                     .map((node) => node.data?.label || 'Tool')
-                    .join(', ') || 'none'}
+                    .join(', ') || '無'}
                 </p>
                 <p className="settings-note">
-                  Linked retrievers:{' '}
-                  {getLinkedRetrieverStoreIds(selectedNode.id).join(', ') || 'none'}
+                  已連接 Retriever：{' '}
+                  {getLinkedRetrieverStoreIds(selectedNode.id).join(', ') || '無'}
                 </p>
 
                 <label>
-                  Agent Prompt
+                  Agent 提示詞
                   <textarea
                     rows={5}
-                    placeholder="You are a helpful assistant..."
+                    placeholder="你是一個樂於助人的助手..."
                     value={selectedNode.data?.agentPrompt || ''}
                     onChange={(event) =>
                       updateNodeData(selectedNode.id, { agentPrompt: event.target.value })
@@ -1843,11 +2153,11 @@ function FlowBuilder() {
             {isLlmNode && (
               <>
                 <p className="settings-note">
-                  Linked retrievers:{' '}
-                  {getLinkedRetrieverStoreIds(selectedNode.id).join(', ') || 'none'}
+                  已連接 Retriever：{' '}
+                  {getLinkedRetrieverStoreIds(selectedNode.id).join(', ') || '無'}
                 </p>
                 <label>
-                  Provider
+                  供應商
                   <select
                     value={selectedNode.data?.provider || 'openai'}
                     onChange={(event) =>
@@ -1875,7 +2185,7 @@ function FlowBuilder() {
                 </label>
 
                 <label>
-                  OpenAI API Key
+                  OpenAI 金鑰
                   <input
                     type="password"
                     placeholder="sk-..."
@@ -1891,7 +2201,7 @@ function FlowBuilder() {
             {isToolNode && (
               <>
                 <label>
-                  Tool Type
+                  工具類型
                   <select
                     value={selectedNode.data?.toolKind || 'retriever'}
                     onChange={(event) =>
@@ -1905,7 +2215,7 @@ function FlowBuilder() {
                 {selectedNode.data?.toolKind === 'retriever' && (
                   <>
                     <label>
-                      Retriever Provider
+                      Retriever 供應商
                       <select
                         value={selectedNode.data?.retriever?.provider || 'openai'}
                         onChange={(event) =>
@@ -1922,7 +2232,7 @@ function FlowBuilder() {
                     </label>
 
                     <label>
-                      Upload PDF
+                      上傳 PDF
                       <input
                         type="file"
                         accept="application/pdf"
@@ -1935,7 +2245,7 @@ function FlowBuilder() {
                     </label>
 
                     <label>
-                      Vector Store ID
+                      向量資料庫 ID
                       <input
                         type="text"
                         value={selectedNode.data?.retriever?.vectorStoreId || ''}
@@ -1945,7 +2255,7 @@ function FlowBuilder() {
 
                     {selectedNode.data?.retriever?.lastFileName && (
                       <p className="settings-note">
-                        Last uploaded file: <code>{selectedNode.data.retriever.lastFileName}</code>
+                        最近上傳檔案：<code>{selectedNode.data.retriever.lastFileName}</code>
                       </p>
                     )}
                     {selectedNode.data?.retriever?.status && (
@@ -1961,10 +2271,10 @@ function FlowBuilder() {
 
             {isPromptNode && (
               <label>
-                Prompt text
+                提示詞內容
                 <textarea
                   rows={7}
-                  placeholder="You are a helpful assistant that..."
+                  placeholder="你是一個會協助使用者完成任務的助手..."
                   value={selectedNode.data?.prompt || ''}
                   onChange={(event) =>
                     updateNodeData(selectedNode.id, { prompt: event.target.value })
@@ -1976,7 +2286,7 @@ function FlowBuilder() {
             {isConditionNode && (
               <>
                 <label>
-                  Condition type
+                  條件類型
                   <input
                     type="text"
                     value={selectedNode.data?.conditionKind || 'custom'}
@@ -1984,7 +2294,7 @@ function FlowBuilder() {
                   />
                 </label>
                 <label>
-                  Branch labels (one per line)
+                  分支標籤（每行一個）
                   <textarea
                     rows={5}
                     placeholder={'true\nfalse'}
@@ -1995,13 +2305,93 @@ function FlowBuilder() {
                   />
                 </label>
                 <p className="settings-note">
-                  Connect outgoing edges in order. Branch labels map to those target nodes in sequence.
+                  請依序連接輸出邊，分支標籤會依順序對應目標節點。
                 </p>
+              </>
+            )}
+
+            {isGroupNode && (
+              <>
+                <p className="settings-note">範圍群組：框內節點可綁定並跟著一起拖移。</p>
+                <label>
+                  範圍寬度
+                  <input
+                    type="number"
+                    min={180}
+                    value={selectedNode.data?.rangeWidth || 420}
+                    onChange={(event) =>
+                      updateGroupRangeSize(selectedNode.id, {
+                        rangeWidth: event.target.value,
+                        rangeHeight: selectedNode.data?.rangeHeight || 240,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  範圍高度
+                  <input
+                    type="number"
+                    min={120}
+                    value={selectedNode.data?.rangeHeight || 240}
+                    onChange={(event) =>
+                      updateGroupRangeSize(selectedNode.id, {
+                        rangeWidth: selectedNode.data?.rangeWidth || 420,
+                        rangeHeight: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="system-var-add"
+                  onClick={() => attachNodesIntoGroupRange(selectedNode.id)}
+                >
+                  套用範圍內節點
+                </button>
+                <button
+                  type="button"
+                  className="system-var-remove"
+                  onClick={() => detachNodesFromGroupRange(selectedNode.id)}
+                >
+                  解除範圍節點綁定
+                </button>
               </>
             )}
           </div>
         )}
       </aside>
+
+      {errorDialogMessage && (
+        <div className="error-modal-backdrop" onClick={() => setErrorDialogMessage('')}>
+          <div
+            className="error-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="runner-error-title"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="error-modal-header">
+              <h3 id="runner-error-title">流程檢查錯誤</h3>
+              <button
+                type="button"
+                className="error-modal-close"
+                onClick={() => setErrorDialogMessage('')}
+                aria-label="關閉"
+              >
+                ×
+              </button>
+            </div>
+            <p>{errorDialogMessage}</p>
+            <button
+              type="button"
+              className="error-modal-action"
+              onClick={() => setErrorDialogMessage('')}
+            >
+              確定
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
