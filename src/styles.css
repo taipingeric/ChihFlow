@@ -101,6 +101,35 @@ body,
   background: radial-gradient(circle at 8% 20%, #fef3c7 0, #f9fafb 34%, #f9fafb 100%);
 }
 
+.react-flow__handle.flow-handle {
+  width: 14px !important;
+  height: 14px !important;
+  border: 1px solid #9ca3af !important;
+  background: #ffffff !important;
+  border-radius: 999px !important;
+}
+
+/* Keep handle center aligned on the node border line */
+.react-flow__handle-left.flow-handle {
+  left: 0 !important;
+  transform: translate(-50%, -50%) !important;
+}
+
+.react-flow__handle-right.flow-handle {
+  right: 0 !important;
+  transform: translate(50%, -50%) !important;
+}
+
+.react-flow__handle-top.flow-handle {
+  top: 0 !important;
+  transform: translate(-50%, -50%) !important;
+}
+
+.react-flow__handle-bottom.flow-handle {
+  bottom: 0 !important;
+  transform: translate(-50%, 50%) !important;
+}
+
 .runner-panel {
   margin-top: auto;
   border: 1px solid #e4e4e7;

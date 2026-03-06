@@ -3,6 +3,7 @@ import ReactFlow, {
   Background,
   Controls,
   Handle,
+  MarkerType,
   MiniMap,
   Position,
   addEdge,
@@ -277,17 +278,35 @@ function AgentCanvasNode({ data }) {
         position: 'relative',
       }}
     >
-      <Handle id="flow-in" type="target" position={Position.Left} />
-      <Handle id="llm-in" type="target" position={Position.Bottom} style={{ left: '25%' }} />
-      <Handle id="prompt-in" type="target" position={Position.Bottom} style={{ left: '50%' }} />
-      <Handle id="tool-in" type="target" position={Position.Bottom} style={{ left: '75%' }} />
+      <Handle id="flow-in" type="target" position={Position.Left} className="flow-handle" />
+      <Handle
+        id="llm-in"
+        type="target"
+        position={Position.Bottom}
+        style={{ left: '25%' }}
+        className="flow-handle"
+      />
+      <Handle
+        id="prompt-in"
+        type="target"
+        position={Position.Bottom}
+        style={{ left: '50%' }}
+        className="flow-handle"
+      />
+      <Handle
+        id="tool-in"
+        type="target"
+        position={Position.Bottom}
+        style={{ left: '75%' }}
+        className="flow-handle"
+      />
       <strong>{data?.label || 'Agent'}</strong>
       <div
         style={{
           position: 'absolute',
           left: 0,
           right: 0,
-          bottom: 3,
+          bottom: 12,
           fontSize: 11,
           color: '#3f3f46',
           pointerEvents: 'none',
@@ -304,7 +323,7 @@ function AgentCanvasNode({ data }) {
           Tool
         </span>
       </div>
-      <Handle type="source" position={Position.Right} />
+      <Handle type="source" position={Position.Right} className="flow-handle" />
     </div>
   );
 }
@@ -339,7 +358,7 @@ function StartCanvasNode({ data }) {
       }}
     >
       <strong>{data?.label || 'START'}</strong>
-      <Handle id="start-out" type="source" position={Position.Right} />
+      <Handle id="start-out" type="source" position={Position.Right} className="flow-handle" />
     </div>
   );
 }
@@ -356,7 +375,7 @@ function LlmCanvasNode({ data }) {
       }}
     >
       <strong>{data?.label || 'LLM'}</strong>
-      <Handle id="llm-top" type="source" position={Position.Top} />
+      <Handle id="llm-top" type="source" position={Position.Top} className="flow-handle" />
     </div>
   );
 }
@@ -373,7 +392,7 @@ function ToolCanvasNode({ data }) {
       }}
     >
       <strong>{data?.label || 'Tool'}</strong>
-      <Handle id="tool-top" type="source" position={Position.Top} />
+      <Handle id="tool-top" type="source" position={Position.Top} className="flow-handle" />
     </div>
   );
 }
@@ -389,9 +408,9 @@ function PromptCanvasNode({ data }) {
         padding: 10,
       }}
     >
-      <Handle id="prompt-in" type="target" position={Position.Left} />
+      <Handle id="prompt-in" type="target" position={Position.Left} className="flow-handle" />
       <strong>{data?.label || 'Prompt'}</strong>
-      <Handle id="prompt-out" type="source" position={Position.Right} />
+      <Handle id="prompt-out" type="source" position={Position.Right} className="flow-handle" />
     </div>
   );
 }
@@ -407,7 +426,7 @@ function OutputCanvasNode({ data }) {
         padding: 10,
       }}
     >
-      <Handle id="output-in" type="target" position={Position.Left} />
+      <Handle id="output-in" type="target" position={Position.Left} className="flow-handle" />
       <strong>{data?.label || 'Output'}</strong>
     </div>
   );
@@ -506,7 +525,23 @@ function FlowBuilder() {
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) || null;
 
   const onConnect = useCallback(
-    (params) => setEdges((eds) => addEdge({ ...params, animated: true }, eds)),
+    (params) =>
+      setEdges((eds) =>
+        addEdge(
+          {
+            ...params,
+            animated: true,
+            style: { stroke: '#52525b', strokeWidth: 1.8 },
+            markerEnd: {
+              type: MarkerType.ArrowClosed,
+              color: '#52525b',
+              width: 20,
+              height: 20,
+            },
+          },
+          eds
+        )
+      ),
     [setEdges]
   );
 
