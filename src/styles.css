@@ -495,7 +495,14 @@ body,
 
 .start-key-row {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: 1fr 120px auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.incoming-state-row {
+  display: grid;
+  grid-template-columns: 1fr 120px;
   gap: 8px;
   align-items: center;
 }
@@ -557,6 +564,10 @@ body,
   }
 
   .start-key-row {
+    grid-template-columns: 1fr;
+  }
+
+  .incoming-state-row {
     grid-template-columns: 1fr;
   }
 }

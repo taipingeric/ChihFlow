@@ -109,16 +109,17 @@ const defaultSystemVars = Object.entries(defaultSystemConfig?.variables || {}).m
 );
 const createDefaultSystemVars = () => defaultSystemVars.map((item) => ({ ...item }));
 const defaultStartStateKeys = [
-  'user_input',
-  'prompt',
-  'result',
-  'last_agent',
-  'last_llm',
-  'retriever_store_id',
-  'route',
-  'conversation_messages',
+  { key: 'user_input', type: 'string' },
+  { key: 'prompt', type: 'string' },
+  { key: 'result', type: 'string' },
+  { key: 'last_agent', type: 'string' },
+  { key: 'last_llm', type: 'string' },
+  { key: 'retriever_store_id', type: 'string' },
+  { key: 'route', type: 'string' },
+  { key: 'conversation_messages', type: 'array' },
 ];
-const createDefaultStartStateKeys = () => defaultStartStateKeys.map((key) => ({ key }));
+const createDefaultStartStateKeys = () => defaultStartStateKeys.map((item) => ({ ...item }));
+const stateDataTypeOptions = ['string', 'number', 'boolean', 'array', 'object'];
 
 const initialNodes = [
   {
@@ -179,6 +180,71 @@ const toIdentifier = (value, fallback) => {
   const base = (value || fallback || 'node').toLowerCase();
   const cleaned = base.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
   return cleaned || fallback || 'node';
+};
+
+const normalizeStateDataType = (value) => {
+  const type = String(value || '').trim().toLowerCase();
+  return stateDataTypeOptions.includes(type) ? type : 'string';
+};
+
+const getJsDefaultLiteralByType = (type) => {
+  switch (normalizeStateDataType(type)) {
+    case 'number':
+      return '0';
+    case 'boolean':
+      return 'false';
+    case 'array':
+      return '[]';
+    case 'object':
+      return '{}';
+    default:
+      return "''";
+  }
+};
+
+const getPythonDefaultLiteralByType = (type) => {
+  switch (normalizeStateDataType(type)) {
+    case 'number':
+      return '0';
+    case 'boolean':
+      return 'False';
+    case 'array':
+      return '[]';
+    case 'object':
+      return '{}';
+    default:
+      return "''";
+  }
+};
+
+const getPythonAnnotationByType = (type) => {
+  switch (normalizeStateDataType(type)) {
+    case 'number':
+      return 'float';
+    case 'boolean':
+      return 'bool';
+    case 'array':
+      return 'list';
+    case 'object':
+      return 'dict';
+    default:
+      return 'str';
+  }
+};
+
+const getJsDocTypeByType = (type) => {
+  switch (normalizeStateDataType(type)) {
+    case 'number':
+      return 'number';
+    case 'boolean':
+      return 'boolean';
+    case 'array':
+      return 'Array<any>';
+    case 'object':
+      return 'Object';
+    default:
+      return 'string';
+  }
 };
 
 const parseBranches = (value) =>
@@ -821,7 +887,7 @@ function FlowBuilder() {
             ...node,
             data: {
               ...node.data,
-              startStateKeys: [...(node.data?.startStateKeys || []), { key: '' }],
+              startStateKeys: [...(node.data?.startStateKeys || []), { key: '', type: 'string' }],
             },
           };
         })
@@ -898,21 +964,71 @@ function FlowBuilder() {
     ];
     return Array.from(new Set(requiredKeys.concat(configuredKeys, agentOutputKeys)));
   }, [nodes]);
+  const getStartStateDefinitions = useCallback(() => {
+    const startNode = nodes.find((node) => node.data?.nodeType === 'start') || null;
+    const configuredEntries = (startNode?.data?.startStateKeys || [])
+      .map((item) => ({
+        key: String(item?.key || '').trim(),
+        type: normalizeStateDataType(item?.type),
+      }))
+      .filter((item) => item.key);
+    const builtInEntries = [
+      { key: 'user_input', type: 'string' },
+      { key: 'prompt', type: 'string' },
+      { key: 'result', type: 'string' },
+      { key: 'last_agent', type: 'string' },
+      { key: 'last_llm', type: 'string' },
+      { key: 'retriever_store_id', type: 'string' },
+      { key: 'route', type: 'string' },
+      { key: 'conversation_messages', type: 'array' },
+      { key: 'apiKey', type: 'string' },
+      { key: 'defaultModel', type: 'string' },
+      { key: 'systemPrompt', type: 'string' },
+      { key: 'has_system_api_key', type: 'boolean' },
+    ];
+    const map = new Map();
+    builtInEntries.concat(configuredEntries).forEach((item) => {
+      if (!item.key) {
+        return;
+      }
+      map.set(item.key, item.type);
+    });
+    nodes
+      .filter((node) => node.data?.nodeType === 'agent')
+      .forEach((node) => {
+        const key = String(node.data?.outputStateKey || '').trim();
+        if (key) {
+          map.set(key, key === 'conversation_messages' ? 'array' : 'string');
+        }
+      });
+    return map;
+  }, [nodes]);
   const getConfiguredStartStateKeys = useCallback(() => {
     const startNode = nodes.find((node) => node.data?.nodeType === 'start') || null;
     return (startNode?.data?.startStateKeys || [])
-      .map((item) => String(item?.key || '').trim())
-      .filter(Boolean);
+      .map((item) => ({
+        key: String(item?.key || '').trim(),
+        type: normalizeStateDataType(item?.type),
+      }))
+      .filter((item) => item.key);
   }, [nodes]);
-  const getStartStateDefaultLiteral = useCallback((key, language) => {
-    if (key === 'conversation_messages') {
-      return '[]';
-    }
-    if (key === 'has_system_api_key') {
-      return language === 'python' ? 'False' : 'false';
-    }
-    return "''";
-  }, []);
+  const getStateDatatype = useCallback(
+    (key) => {
+      const typeMap = getStartStateDefinitions();
+      return typeMap.get(String(key || '').trim()) || 'string';
+    },
+    [getStartStateDefinitions]
+  );
+  const getStartStateDefaultLiteral = useCallback(
+    (key, language) => {
+      const dataType = getStateDatatype(key);
+      if (language === 'python') {
+        return getPythonDefaultLiteralByType(dataType);
+      }
+      return getJsDefaultLiteralByType(dataType);
+    },
+    [getStateDatatype]
+  );
   const updateGroupRangeSize = useCallback(
     (nodeId, patch) => {
       const nextWidth = Math.max(180, Number(patch?.rangeWidth) || 420);
@@ -1157,21 +1273,36 @@ function FlowBuilder() {
     switch (node.data.nodeType) {
       case 'start':
         return (node.data?.startStateKeys || [])
-          .map((item) => String(item?.key || '').trim())
-          .filter(Boolean);
+          .map((item) => ({
+            key: String(item?.key || '').trim(),
+            type: normalizeStateDataType(item?.type),
+          }))
+          .filter((item) => item.key);
       case 'prompt':
-        return ['prompt'];
+        return [{ key: 'prompt', type: 'string' }];
       case 'tool':
-        return node.data?.toolKind === 'retriever' ? ['retriever_store_id'] : [];
+        return node.data?.toolKind === 'retriever'
+          ? [{ key: 'retriever_store_id', type: 'string' }]
+          : [];
       case 'llm':
-        return ['last_llm', 'result'];
+        return [
+          { key: 'last_llm', type: 'string' },
+          { key: 'result', type: 'string' },
+        ];
       case 'condition':
-        return ['route'];
+        return [{ key: 'route', type: 'string' }];
       case 'system':
-        return ['has_system_api_key'];
+        return [{ key: 'has_system_api_key', type: 'boolean' }];
       case 'agent': {
         const outputKey = String(node.data?.outputStateKey || 'result').trim() || 'result';
-        return ['last_agent', 'result', 'systemPrompt', 'conversation_messages', outputKey];
+        const outputType = outputKey === 'conversation_messages' ? 'array' : 'string';
+        return [
+          { key: 'last_agent', type: 'string' },
+          { key: 'result', type: 'string' },
+          { key: 'systemPrompt', type: 'string' },
+          { key: 'conversation_messages', type: 'array' },
+          { key: outputKey, type: outputType },
+        ];
       }
       default:
         return [];
@@ -1180,11 +1311,18 @@ function FlowBuilder() {
   const getIncomingStateKeys = useCallback(
     (targetNodeId) => {
       const incomingNodes = getIncomingNodes(targetNodeId);
-      const keys = incomingNodes.flatMap((sourceNode) => getNodeOutputStateKeys(sourceNode));
-      return Array.from(new Set(keys));
+      const keyMap = new Map();
+      incomingNodes.flatMap((sourceNode) => getNodeOutputStateKeys(sourceNode)).forEach((item) => {
+        if (!item?.key) {
+          return;
+        }
+        keyMap.set(item.key, item.type || 'string');
+      });
+      return Array.from(keyMap.entries()).map(([key, type]) => ({ key, type }));
     },
     [getIncomingNodes, getNodeOutputStateKeys]
   );
+  const selectedIncomingStateKeys = selectedNode ? getIncomingStateKeys(selectedNode.id) : [];
   const buildAgentSystemPrompt = useCallback(
     (agentNodeId, basePrompt = '') => {
       const linkedPromptTexts = getLinkedPromptNodes(agentNodeId)
@@ -1432,7 +1570,8 @@ function FlowBuilder() {
 
         if (node.data?.nodeType === 'start') {
           const startInitPairs = configuredStartKeys.map(
-            (key) => `'${key}': state.get('${key}', ${getStartStateDefaultLiteral(key, 'python')})`
+            (item) =>
+              `'${item.key}': state.get('${item.key}', ${getStartStateDefaultLiteral(item.key, 'python')})`
           );
           const startReturnExpr = startInitPairs.length
             ? `{**state, ${startInitPairs.join(', ')}}`
@@ -1521,7 +1660,9 @@ function FlowBuilder() {
 
       const entryFn = entryId && idToFn[entryId] ? idToFn[entryId] : Object.values(idToFn)[0];
       const entryHasOutgoing = entryId ? (outgoingBySource.get(entryId) || []).length > 0 : false;
-      const pythonStateTypeLines = stateKeys.map((key) => `    ${JSON.stringify(key)}: str,`);
+      const pythonStateTypeLines = stateKeys.map(
+        (key) => `    ${JSON.stringify(key)}: ${getPythonAnnotationByType(getStateDatatype(key))},`
+      );
 
       return [
         'from typing import TypedDict, Optional',
@@ -1558,6 +1699,7 @@ function FlowBuilder() {
       getStartStateKeysForCode,
       getConfiguredStartStateKeys,
       getStartStateDefaultLiteral,
+      getStateDatatype,
     ]
   );
 
@@ -1718,7 +1860,8 @@ function FlowBuilder() {
 
         if (node.data?.nodeType === 'start') {
           const startInitProps = configuredStartKeys.map(
-            (key) => `'${key}': state['${key}'] ?? ${getStartStateDefaultLiteral(key, 'js')}`
+            (item) =>
+              `'${item.key}': state['${item.key}'] ?? ${getStartStateDefaultLiteral(item.key, 'js')}`
           );
           const startReturnExpr = startInitProps.length
             ? `{ ...state, ${startInitProps.join(', ')} }`
@@ -1782,7 +1925,9 @@ function FlowBuilder() {
         .join('\n');
 
       const entryFn = entryId && idToFn[entryId] ? idToFn[entryId] : Object.values(idToFn)[0];
-      const jsStatePropertyLines = stateKeys.map((key) => ` * @property {any} ${key}`);
+      const jsStatePropertyLines = stateKeys.map(
+        (key) => ` * @property {${getJsDocTypeByType(getStateDatatype(key))}} ${key}`
+      );
       return [
         '// Runtime-provided: StateGraph, END, runModel, createAgent',
         '',
@@ -1838,6 +1983,7 @@ function FlowBuilder() {
       getStartStateKeysForCode,
       getConfiguredStartStateKeys,
       getStartStateDefaultLiteral,
+      getStateDatatype,
     ]
   );
 
@@ -2472,20 +2618,26 @@ function FlowBuilder() {
               <input type="text" value={selectedNode.data?.nodeType || ''} readOnly />
             </label>
 
-            <p className="settings-note">接收到的 State Keys</p>
-            <div className="start-key-list">
-              {getIncomingStateKeys(selectedNode.id).length > 0 ? (
-                getIncomingStateKeys(selectedNode.id).map((key, index) => (
-                  <div key={`incoming-state-key-${index}`} className="start-key-row">
-                    <input type="text" value={key} readOnly />
-                  </div>
-                ))
-              ) : (
-                <div className="start-key-row">
-                  <input type="text" value="無" readOnly />
+            {!isAgentNode && (
+              <>
+                <p className="settings-note">接收到的 State Keys</p>
+                <div className="start-key-list">
+                  {selectedIncomingStateKeys.length > 0 ? (
+                    selectedIncomingStateKeys.map((item, index) => (
+                      <div key={`incoming-state-key-${index}`} className="incoming-state-row">
+                        <input type="text" value={item.key} readOnly />
+                        <input type="text" value={item.type} readOnly />
+                      </div>
+                    ))
+                  ) : (
+                    <div className="incoming-state-row">
+                      <input type="text" value="無" readOnly />
+                      <input type="text" value="-" readOnly />
+                    </div>
+                  )}
                 </div>
-              )}
-            </div>
+              </>
+            )}
 
             {isStartNode && (
               <>
@@ -2505,6 +2657,18 @@ function FlowBuilder() {
                           updateStartStateKey(selectedNode.id, index, { key: event.target.value })
                         }
                       />
+                      <select
+                        value={normalizeStateDataType(item.type)}
+                        onChange={(event) =>
+                          updateStartStateKey(selectedNode.id, index, { type: event.target.value })
+                        }
+                      >
+                        {stateDataTypeOptions.map((option) => (
+                          <option key={option} value={option}>
+                            {option}
+                          </option>
+                        ))}
+                      </select>
                       <button
                         type="button"
                         className="system-var-remove"
@@ -2610,15 +2774,55 @@ function FlowBuilder() {
 
                 <label>
                   輸出 State Key
-                  <input
-                    type="text"
-                    placeholder="result"
-                    value={selectedNode.data?.outputStateKey || 'result'}
-                    onChange={(event) =>
-                      updateNodeData(selectedNode.id, { outputStateKey: event.target.value })
+                  <select
+                    value={
+                      selectedIncomingStateKeys.some(
+                        (item) => item.key === (selectedNode.data?.outputStateKey || 'result')
+                      )
+                        ? selectedNode.data?.outputStateKey || 'result'
+                        : '__new__'
                     }
-                  />
+                    onChange={(event) => {
+                      if (event.target.value === '__new__') {
+                        const existingCustomKey = String(
+                          selectedNode.data?.outputStateKey || ''
+                        ).trim();
+                        updateNodeData(selectedNode.id, {
+                          outputStateKey:
+                            selectedIncomingStateKeys.some((item) => item.key === existingCustomKey)
+                              ? ''
+                              : existingCustomKey,
+                        });
+                        return;
+                      }
+                      updateNodeData(selectedNode.id, { outputStateKey: event.target.value });
+                    }}
+                  >
+                    {selectedIncomingStateKeys.map((item) => (
+                      <option key={`agent-output-key-${item.key}`} value={item.key}>
+                        {item.key} ({item.type})
+                      </option>
+                    ))}
+                    <option value="__new__">新增 Key</option>
+                  </select>
                 </label>
+
+                {(!selectedIncomingStateKeys.some(
+                  (item) => item.key === (selectedNode.data?.outputStateKey || 'result')
+                ) ||
+                  !String(selectedNode.data?.outputStateKey || '').trim()) && (
+                  <label>
+                    新增 Key 名稱
+                    <input
+                      type="text"
+                      placeholder="result"
+                      value={selectedNode.data?.outputStateKey || ''}
+                      onChange={(event) =>
+                        updateNodeData(selectedNode.id, { outputStateKey: event.target.value })
+                      }
+                    />
+                  </label>
+                )}
 
                 <label>
                   寫入方式
@@ -2632,6 +2836,23 @@ function FlowBuilder() {
                     <option value="replace">replace（覆蓋）</option>
                   </select>
                 </label>
+
+                <p className="settings-note">接收到的 State Keys</p>
+                <div className="start-key-list">
+                  {selectedIncomingStateKeys.length > 0 ? (
+                    selectedIncomingStateKeys.map((item, index) => (
+                      <div key={`incoming-state-key-${index}`} className="incoming-state-row">
+                        <input type="text" value={item.key} readOnly />
+                        <input type="text" value={item.type} readOnly />
+                      </div>
+                    ))
+                  ) : (
+                    <div className="incoming-state-row">
+                      <input type="text" value="無" readOnly />
+                      <input type="text" value="-" readOnly />
+                    </div>
+                  )}
+                </div>
               </>
             )}
 
