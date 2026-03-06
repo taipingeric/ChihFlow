@@ -1,4 +1,4 @@
-import { useCallback, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactFlow, {
   Background,
   Controls,
@@ -12,6 +12,9 @@ import ReactFlow, {
 } from 'reactflow';
 import 'reactflow/dist/style.css';
 import defaultSystemConfig from '../config/system.default.json';
+import { generateLangGraphJsCode as buildLangGraphJsPreview } from '../lib/codegen/jsGenerator';
+import { generateLangGraphPythonCode as buildLangGraphPythonPreview } from '../lib/codegen/pythonGenerator';
+import { buildCompiledLangGraphApp as compileLangGraphApp, searchOpenAIVectorStore as searchVectorStore } from '../lib/runtime/langgraphRuntime';
 
 const nodePalette = [
   {
@@ -108,6 +111,19 @@ const defaultSystemVars = Object.entries(defaultSystemConfig?.variables || {}).m
   })
 );
 const createDefaultSystemVars = () => defaultSystemVars.map((item) => ({ ...item }));
+const defaultStructuredOutputSchema = {
+  type: 'object',
+  properties: {
+    answer: {
+      type: 'string',
+      description: 'The assistant response.',
+    },
+  },
+  required: ['answer'],
+  additionalProperties: false,
+};
+const createDefaultStructuredOutputSchemaText = () =>
+  JSON.stringify(defaultStructuredOutputSchema, null, 2);
 const defaultStartStateKeys = [
   { key: 'user_input', type: 'string' },
   { key: 'prompt', type: 'string' },
@@ -148,6 +164,10 @@ const initialNodes = [
       agentPrompt: 'You are a helpful assistant.',
       outputStateKey: 'result',
       outputWriteMode: 'append',
+      structuredOutputEnabled: false,
+      structuredOutputStrategy: 'auto',
+      structuredOutputStateKey: 'structured_response',
+      structuredOutputSchemaText: createDefaultStructuredOutputSchemaText(),
     },
   },
   {
@@ -175,12 +195,6 @@ const initialEdges = [];
 
 let nodeId = 5;
 const getId = () => `${nodeId++}`;
-
-const toIdentifier = (value, fallback) => {
-  const base = (value || fallback || 'node').toLowerCase();
-  const cleaned = base.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
-  return cleaned || fallback || 'node';
-};
 
 const normalizeStateDataType = (value) => {
   const type = String(value || '').trim().toLowerCase();
@@ -232,6 +246,30 @@ const getPythonAnnotationByType = (type) => {
   }
 };
 
+const toPythonLiteral = (value) => {
+  if (value === null || value === undefined) {
+    return 'None';
+  }
+  if (typeof value === 'string') {
+    return JSON.stringify(value);
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) ? String(value) : '0';
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'True' : 'False';
+  }
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => toPythonLiteral(item)).join(', ')}]`;
+  }
+  if (typeof value === 'object') {
+    return `{${Object.entries(value)
+      .map(([key, item]) => `${JSON.stringify(key)}: ${toPythonLiteral(item)}`)
+      .join(', ')}}`;
+  }
+  return JSON.stringify(String(value));
+};
+
 const getJsDocTypeByType = (type) => {
   switch (normalizeStateDataType(type)) {
     case 'number':
@@ -247,6 +285,97 @@ const getJsDocTypeByType = (type) => {
   }
 };
 
+const getDefaultStateValueByType = (type) => {
+  switch (normalizeStateDataType(type)) {
+    case 'number':
+      return 0;
+    case 'boolean':
+      return false;
+    case 'array':
+      return [];
+    case 'object':
+      return {};
+    default:
+      return '';
+  }
+};
+
+const parseStructuredOutputSchemaText = (schemaText) => {
+  const raw = String(schemaText || '').trim();
+  if (!raw) {
+    return null;
+  }
+  const parsed = JSON.parse(raw);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Structured Output Schema 必須是 JSON object。');
+  }
+  return parsed;
+};
+
+const toLangChainMessages = (
+  messages = [],
+  systemPrompt = '',
+  fallbackUserInput = '',
+  runtime = {}
+) => {
+  const { AIMessage, HumanMessage, SystemMessage } = runtime;
+  if (!AIMessage || !HumanMessage || !SystemMessage) {
+    return [];
+  }
+  const normalized = Array.isArray(messages) ? messages : [];
+  const mapped = normalized
+    .map((message) => {
+      const role = ['system', 'assistant', 'user'].includes(message?.role) ? message.role : 'user';
+      const content = Array.isArray(message?.content)
+        ? message.content
+            .map((part) =>
+              typeof part?.text === 'string' ? part.text : typeof part === 'string' ? part : ''
+            )
+            .filter(Boolean)
+            .join('\n')
+        : String(message?.content || '').trim();
+      if (!content) {
+        return null;
+      }
+      if (role === 'system') {
+        return new SystemMessage(content);
+      }
+      if (role === 'assistant') {
+        return new AIMessage(content);
+      }
+      return new HumanMessage(content);
+    })
+    .filter(Boolean);
+
+  const output = [];
+  if (systemPrompt) {
+    output.push(new SystemMessage(systemPrompt));
+  }
+  if (mapped.length > 0) {
+    output.push(...mapped);
+  } else if (fallbackUserInput) {
+    output.push(new HumanMessage(fallbackUserInput));
+  }
+  return output;
+};
+
+const getLangChainMessageText = (message) => {
+  const content = message?.content;
+  if (typeof content === 'string') {
+    return content.trim();
+  }
+  if (Array.isArray(content)) {
+    return content
+      .map((part) =>
+        typeof part?.text === 'string' ? part.text : typeof part === 'string' ? part : ''
+      )
+      .filter(Boolean)
+      .join('\n')
+      .trim();
+  }
+  return '';
+};
+
 const parseBranches = (value) =>
   (value || '')
     .split('\n')
@@ -257,81 +386,6 @@ const getSystemVarValue = (systemNode, key) => {
   const vars = systemNode?.data?.systemVars || [];
   const hit = vars.find((item) => item.key === key);
   return hit?.value || '';
-};
-
-const END = '__END__';
-class BrowserStateGraph {
-  constructor() {
-    this.nodes = new Map();
-    this.edges = new Map();
-    this.conditional = new Map();
-    this.entry = null;
-  }
-
-  addNode(name, fn) {
-    this.nodes.set(name, fn);
-  }
-
-  addEdge(source, target) {
-    if (!this.edges.has(source)) {
-      this.edges.set(source, []);
-    }
-    this.edges.get(source).push(target);
-  }
-
-  addConditionalEdges(source, router, routeMap) {
-    this.conditional.set(source, { router, routeMap });
-  }
-
-  setEntryPoint(name) {
-    this.entry = name;
-  }
-
-  compile() {
-    const self = this;
-    return {
-      invoke: async (initialState) => {
-        let current = self.entry;
-        let state = { ...(initialState || {}) };
-        let steps = 0;
-        while (current && current !== END) {
-          if (steps > 200) {
-            throw new Error('Graph exceeded max steps (possible loop).');
-          }
-          const nodeFn = self.nodes.get(current);
-          if (!nodeFn) {
-            throw new Error(`Missing node handler: ${current}`);
-          }
-          state = (await nodeFn(state)) || state;
-          const conditional = self.conditional.get(current);
-          if (conditional) {
-            const route = await conditional.router(state);
-            current = conditional.routeMap?.[route] || Object.values(conditional.routeMap || {})[0] || END;
-          } else {
-            const nextList = self.edges.get(current) || [];
-            current = nextList[0] || END;
-          }
-          steps += 1;
-        }
-        return state;
-      },
-    };
-  }
-}
-
-const executeGeneratedGraph = async (code, runModel, createAgent, initialState) => {
-  const appFactory = new Function(
-    'StateGraph',
-    'END',
-    'runModel',
-    'createAgent',
-    `${code}\nreturn app;`
-  );
-  const app = appFactory(BrowserStateGraph, END, runModel, createAgent);
-  if (!app || typeof app.invoke !== 'function') {
-    throw new Error('Generated graph did not compile to an invokable app.');
-  }
-  return app.invoke(initialState);
 };
 
 function AgentCanvasNode({ data }) {
@@ -589,13 +643,17 @@ const getMiniMapNodeColor = (node) => {
 
 function FlowBuilder() {
   const wrapperRef = useRef(null);
+  const langChainRuntimePromiseRef = useRef(null);
   const [reactFlowInstance, setReactFlowInstance] = useState(null);
   const [selectedNodeId, setSelectedNodeId] = useState('1');
+  const [sidebarWidth, setSidebarWidth] = useState(290);
+  const [settingsWidth, setSettingsWidth] = useState(320);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isSettingsCollapsed, setIsSettingsCollapsed] = useState(false);
   const [showConditionOptions, setShowConditionOptions] = useState(false);
   const [showToolOptions, setShowToolOptions] = useState(false);
   const [codeTab, setCodeTab] = useState('js');
+  const [codeActionMessage, setCodeActionMessage] = useState('');
   const [chatInput, setChatInput] = useState('');
   const [chatHistory, setChatHistory] = useState([]);
   const [isRunning, setIsRunning] = useState(false);
@@ -616,6 +674,30 @@ function FlowBuilder() {
     }),
     []
   );
+  const loadLangChainRuntime = useCallback(async () => {
+    if (!langChainRuntimePromiseRef.current) {
+      langChainRuntimePromiseRef.current = Promise.all([
+        import('@langchain/core/messages'),
+        import('@langchain/langgraph/web'),
+        import('@langchain/openai'),
+        import('langchain'),
+      ]).then(([messagesModule, langGraphModule, openAiModule, langChainModule]) => ({
+        AIMessage: messagesModule.AIMessage,
+        HumanMessage: messagesModule.HumanMessage,
+        SystemMessage: messagesModule.SystemMessage,
+        Annotation: langGraphModule.Annotation,
+        END: langGraphModule.END,
+        START: langGraphModule.START,
+        StateGraph: langGraphModule.StateGraph,
+        ChatOpenAI: openAiModule.ChatOpenAI,
+        createAgent: langChainModule.createAgent,
+        providerStrategy: langChainModule.providerStrategy,
+        tool: langChainModule.tool,
+        toolStrategy: langChainModule.toolStrategy,
+      }));
+    }
+    return langChainRuntimePromiseRef.current;
+  }, []);
 
   const selectedNode = nodes.find((node) => node.id === selectedNodeId) || null;
 
@@ -647,6 +729,44 @@ function FlowBuilder() {
   const onPaneClick = useCallback(() => {
     setSelectedNodeId(null);
   }, []);
+
+  const onSidebarResizeMouseDown = useCallback((event) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+
+    const onMouseMove = (moveEvent) => {
+      const nextWidth = Math.min(520, Math.max(220, startWidth + (moveEvent.clientX - startX)));
+      setSidebarWidth(nextWidth);
+    };
+
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [sidebarWidth]);
+
+  const onSettingsResizeMouseDown = useCallback((event) => {
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = settingsWidth;
+
+    const onMouseMove = (moveEvent) => {
+      const nextWidth = Math.min(560, Math.max(240, startWidth - (moveEvent.clientX - startX)));
+      setSettingsWidth(nextWidth);
+    };
+
+    const onMouseUp = () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  }, [settingsWidth]);
 
   const onDragStart = (event, node) => {
     event.dataTransfer.setData('application/reactflow', JSON.stringify(node));
@@ -728,6 +848,14 @@ function FlowBuilder() {
           agentPrompt: paletteNode.type === 'agent' ? 'You are a helpful assistant.' : '',
           outputStateKey: paletteNode.type === 'agent' ? 'result' : '',
           outputWriteMode: paletteNode.type === 'agent' ? 'append' : '',
+          structuredOutputEnabled: paletteNode.type === 'agent' ? false : undefined,
+          structuredOutputStrategy: paletteNode.type === 'agent' ? 'auto' : undefined,
+          structuredOutputStateKey:
+            paletteNode.type === 'agent' ? 'structured_response' : undefined,
+          structuredOutputSchemaText:
+            paletteNode.type === 'agent'
+              ? createDefaultStructuredOutputSchemaText()
+              : undefined,
           globalApiKey: paletteNode.type === 'system' ? '' : '',
           systemVars:
             paletteNode.type === 'system' ? createDefaultSystemVars() : [],
@@ -999,6 +1127,12 @@ function FlowBuilder() {
         const key = String(node.data?.outputStateKey || '').trim();
         if (key) {
           map.set(key, key === 'conversation_messages' ? 'array' : 'string');
+        }
+        if (node.data?.structuredOutputEnabled) {
+          const structuredKey = String(node.data?.structuredOutputStateKey || '').trim();
+          if (structuredKey) {
+            map.set(structuredKey, 'object');
+          }
         }
       });
     return map;
@@ -1296,13 +1430,20 @@ function FlowBuilder() {
       case 'agent': {
         const outputKey = String(node.data?.outputStateKey || 'result').trim() || 'result';
         const outputType = outputKey === 'conversation_messages' ? 'array' : 'string';
-        return [
+        const items = [
           { key: 'last_agent', type: 'string' },
           { key: 'result', type: 'string' },
           { key: 'systemPrompt', type: 'string' },
           { key: 'conversation_messages', type: 'array' },
           { key: outputKey, type: outputType },
         ];
+        if (node.data?.structuredOutputEnabled) {
+          const structuredKey =
+            String(node.data?.structuredOutputStateKey || 'structured_response').trim() ||
+            'structured_response';
+          items.push({ key: structuredKey, type: 'object' });
+        }
+        return items;
       }
       default:
         return [];
@@ -1438,257 +1579,26 @@ function FlowBuilder() {
   );
 
   const generateLangGraphCode = useCallback(
-    (startAgentId) => {
-      const nodeMap = new Map(nodes.map((node) => [node.id, node]));
-      const edgePairs = edges.map((edge) => [edge.source, edge.target]);
-      const connectedTargets = new Set(edges.map((edge) => edge.target));
-      const outgoingBySource = new Map();
-      edges.forEach((edge) => {
-        if (!outgoingBySource.has(edge.source)) {
-          outgoingBySource.set(edge.source, []);
-        }
-        outgoingBySource.get(edge.source).push(edge.target);
-      });
-
-      const startInputNode = nodes.find((node) => node.data?.nodeType === 'start') || null;
-      const startNode =
-        startInputNode ||
-        nodeMap.get(startAgentId) ||
-        nodes.find((node) => node.data?.nodeType === 'agent') ||
-        nodes[0];
-      const entryNode = startNode || nodes.find((node) => !connectedTargets.has(node.id)) || null;
-      const entryId = entryNode?.id || '';
-      const stateKeys = getStartStateKeysForCode();
-      const configuredStartKeys = getConfiguredStartStateKeys();
-
-      const idToFn = {};
-      const functionBlocks = nodes.map((node, index) => {
-        const safeName = toIdentifier(node.data?.label, `node_${index + 1}`);
-        const functionName = `${safeName}_${node.id}`;
-        idToFn[node.id] = functionName;
-
-        if (node.data?.nodeType === 'prompt') {
-          const promptText = node.data?.prompt?.trim() || node.data?.label || 'Prompt';
-          return [
-            `def ${functionName}(state: State):`,
-            `    prompt = ${JSON.stringify(promptText)}`,
-            "    return {**state, 'prompt': prompt}",
-            '',
-          ].join('\n');
-        }
-
-        if (node.data?.nodeType === 'agent') {
-          const linkedRetrieverStores = getLinkedRetrieverStoreIds(node.id);
-          const linkedLlmModels = getLinkedLlmNodes(node.id).map(
-            (llmNode) => llmNode.data?.model || 'gpt-4.1-mini'
-          );
-          const linkedPromptTexts = getLinkedPromptNodes(node.id).map(
-            (promptNode) => promptNode.data?.prompt?.trim() || promptNode.data?.label || 'Prompt'
-          );
-          const linkedTools = getLinkedToolNodes(node.id).map((toolNode) => toolNode.data?.label || 'Tool');
-          const outputStateKey = String(node.data?.outputStateKey || 'result').trim() || 'result';
-          const outputWriteMode = String(node.data?.outputWriteMode || 'append').trim() || 'append';
-          return [
-            `def ${functionName}(state: State):`,
-            `    base_system_prompt = ${JSON.stringify(node.data?.agentPrompt || '')}`,
-            `    linked_prompts = ${JSON.stringify(linkedPromptTexts)}`,
-            "    system_prompt = '\\n\\n'.join([item for item in [base_system_prompt, *linked_prompts] if item])",
-            `    llm_models = ${JSON.stringify(linkedLlmModels)}`,
-            `    linked_tools = ${JSON.stringify(linkedTools)}`,
-            `    retriever_store_ids = ${JSON.stringify(linkedRetrieverStores)}`,
-            `    output_state_key = ${JSON.stringify(outputStateKey)}`,
-            `    output_write_mode = ${JSON.stringify(outputWriteMode)}`,
-            "    model = llm_models[0] if llm_models else state.get('default_model', 'gpt-4.1-mini')",
-            "    tools = []  # TODO: map linked tools/retrievers to real LangChain tools",
-            '    agent = create_agent(',
-            '        model=f"openai:{model}",',
-            '        tools=tools,',
-            '        system_prompt=system_prompt,',
-            '    )',
-            "    result = agent.invoke({'messages': [{'role': 'user', 'content': state.get('user_input', '')}]})",
-            "    text = result.get('output_text', '') if isinstance(result, dict) else ''",
-            "    previous_value = state.get(output_state_key)",
-            "    if output_state_key == 'conversation_messages':",
-            "        assistant_message = {'role': 'assistant', 'content': text}",
-            "        previous_messages = state.get('conversation_messages') if isinstance(state.get('conversation_messages'), list) else []",
-            "        if output_write_mode == 'replace':",
-            '            next_value = [assistant_message]',
-            '        else:',
-            '            next_value = [*previous_messages, assistant_message]',
-            "    elif output_write_mode == 'replace':",
-            '        next_value = text',
-            "    elif isinstance(previous_value, list):",
-            '        next_value = [*previous_value, text]',
-            "    elif isinstance(previous_value, str) and previous_value:",
-            "        next_value = f'{previous_value}\\n{text}'",
-            "    elif previous_value in (None, ''):",
-            '        next_value = text',
-            '    else:',
-            '        next_value = [previous_value, text]',
-            "    return {**state, 'last_agent': " +
-              JSON.stringify(node.data?.label || 'Agent') +
-              ", output_state_key: next_value, 'result': text}",
-            '',
-          ].join('\n');
-        }
-
-        if (node.data?.nodeType === 'llm') {
-          const linkedRetrieverStores = getLinkedRetrieverStoreIds(node.id);
-          return [
-            `def ${functionName}(state: State):`,
-            `    retriever_store_ids = ${JSON.stringify(linkedRetrieverStores)}`,
-            "    # Standalone LLM node.",
-            "    return {**state, 'last_llm': " + JSON.stringify(node.data?.model || 'gpt-4.1-mini') + '}',
-            '',
-          ].join('\n');
-        }
-
-        if (node.data?.nodeType === 'tool') {
-          if (node.data?.toolKind === 'retriever') {
-            return [
-              `def ${functionName}(state: State):`,
-              `    vector_store_id = ${JSON.stringify(node.data?.retriever?.vectorStoreId || '')}`,
-              "    return {**state, 'retriever_store_id': vector_store_id}",
-              '',
-            ].join('\n');
-          }
-          return [
-            `def ${functionName}(state: State):`,
-            '    return state',
-            '',
-          ].join('\n');
-        }
-
-        if (node.data?.nodeType === 'system') {
-          return [
-            `def ${functionName}(state: State):`,
-            "    # Global runtime variables (do not hardcode secrets in generated code).",
-            "    return {**state, 'has_system_api_key': bool(state.get('system_api_key'))}",
-            '',
-          ].join('\n');
-        }
-
-        if (node.data?.nodeType === 'start') {
-          const startInitPairs = configuredStartKeys.map(
-            (item) =>
-              `'${item.key}': state.get('${item.key}', ${getStartStateDefaultLiteral(item.key, 'python')})`
-          );
-          const startReturnExpr = startInitPairs.length
-            ? `{**state, ${startInitPairs.join(', ')}}`
-            : '{**state}';
-          return [
-            `def ${functionName}(state: State):`,
-            "    # Input node: receives message from chat UI",
-            `    return ${startReturnExpr}`,
-            '',
-          ].join('\n');
-        }
-
-        if (node.data?.nodeType === 'condition') {
-          const branchLabels = parseBranches(node.data?.branches);
-          const fallbackRoute = branchLabels[0] || 'default';
-          const conditionKind = node.data?.conditionKind || 'custom';
-          return [
-            `def ${functionName}(state: State):`,
-            `    # Condition type: ${conditionKind}`,
-            "    # Route should be set by your condition logic.",
-            `    return {**state, 'route': state.get('route', ${JSON.stringify(fallbackRoute)})}`,
-            '',
-          ].join('\n');
-        }
-
-        return [
-          `def ${functionName}(state: State):`,
-          `    # ${node.data?.nodeType || 'node'}: ${node.data?.label || 'Unnamed node'}`,
-          '    return state',
-          '',
-        ].join('\n');
-      });
-
-      const conditionNodeIds = new Set(
-        nodes.filter((node) => node.data?.nodeType === 'condition').map((node) => node.id)
-      );
-
-      const edgeLines = edgePairs
-        .filter(([source]) => !conditionNodeIds.has(source))
-        .map(([source, target]) => {
-          const sourceFn = idToFn[source];
-          const targetFn = idToFn[target];
-          if (!sourceFn || !targetFn) {
-            return '';
-          }
-          return `graph.add_edge('${sourceFn}', '${targetFn}')`;
-        })
-        .filter(Boolean)
-        .join('\n');
-
-      const conditionalEdgeLines = nodes
-        .filter((node) => node.data?.nodeType === 'condition')
-        .map((conditionNode) => {
-          const sourceFn = idToFn[conditionNode.id];
-          const targetIds = outgoingBySource.get(conditionNode.id) || [];
-          if (!sourceFn || targetIds.length === 0) {
-            return '';
-          }
-
-          const labels = parseBranches(conditionNode.data?.branches);
-          const routeMap = targetIds
-            .map((targetId, index) => {
-              const targetFn = idToFn[targetId];
-              if (!targetFn) {
-                return null;
-              }
-              const label = labels[index] || `branch_${index + 1}`;
-              return `        ${JSON.stringify(label)}: ${JSON.stringify(targetFn)}`;
-            })
-            .filter(Boolean)
-            .join(',\n');
-
-          const fallbackRoute = labels[0] || 'branch_1';
-          return [
-            'graph.add_conditional_edges(',
-            `    ${JSON.stringify(sourceFn)},`,
-            `    lambda state: state.get('route', ${JSON.stringify(fallbackRoute)}),`,
-            '    {',
-            routeMap,
-            '    }',
-            ')',
-          ].join('\n');
-        })
-        .filter(Boolean)
-        .join('\n');
-
-      const entryFn = entryId && idToFn[entryId] ? idToFn[entryId] : Object.values(idToFn)[0];
-      const entryHasOutgoing = entryId ? (outgoingBySource.get(entryId) || []).length > 0 : false;
-      const pythonStateTypeLines = stateKeys.map(
-        (key) => `    ${JSON.stringify(key)}: ${getPythonAnnotationByType(getStateDatatype(key))},`
-      );
-
-      return [
-        'from typing import TypedDict, Optional',
-        'from langchain.agents import create_agent',
-        'from langgraph.graph import StateGraph, END',
-        '',
-        "State = TypedDict('State', {",
-        ...pythonStateTypeLines,
-        "    'system_api_key': str,",
-        "    'has_system_api_key': bool,",
-        '}, total=False)',
-        '',
-        ...functionBlocks,
-        'graph = StateGraph(State)',
-        ...Object.values(idToFn).map((functionName) => `graph.add_node('${functionName}', ${functionName})`),
-        edgeLines,
-        conditionalEdgeLines,
-        '',
-        entryFn ? `graph.set_entry_point('${entryFn}')` : '',
-        entryFn && !entryHasOutgoing ? `graph.add_edge('${entryFn}', END)` : '',
-        '',
-        'app = graph.compile()',
-      ]
-        .filter(Boolean)
-        .join('\n');
-    },
+    (startAgentId) =>
+      buildLangGraphPythonPreview({
+        nodes,
+        edges,
+        startAgentId,
+        getStartStateKeysForCode,
+        getConfiguredStartStateKeys,
+        getLinkedRetrieverStoreIds,
+        getLinkedLlmNodes,
+        getLinkedPromptNodes,
+        getLinkedToolNodes,
+        getStartStateDefaultLiteral,
+        getStateDatatype,
+        helpers: {
+          parseStructuredOutputSchemaText,
+          parseBranches,
+          toPythonLiteral,
+          getPythonAnnotationByType,
+        },
+      }),
     [
       nodes,
       edges,
@@ -1704,275 +1614,25 @@ function FlowBuilder() {
   );
 
   const generateLangGraphJsCode = useCallback(
-    (startAgentId) => {
-      const nodeMap = new Map(nodes.map((node) => [node.id, node]));
-      const edgePairs = edges.map((edge) => [edge.source, edge.target]);
-      const connectedTargets = new Set(edges.map((edge) => edge.target));
-      const outgoingBySource = new Map();
-      edges.forEach((edge) => {
-        if (!outgoingBySource.has(edge.source)) {
-          outgoingBySource.set(edge.source, []);
-        }
-        outgoingBySource.get(edge.source).push(edge.target);
-      });
-
-      const startInputNode = nodes.find((node) => node.data?.nodeType === 'start') || null;
-      const startNode =
-        startInputNode ||
-        nodeMap.get(startAgentId) ||
-        nodes.find((node) => node.data?.nodeType === 'agent') ||
-        nodes[0];
-      const entryNode = startNode || nodes.find((node) => !connectedTargets.has(node.id)) || null;
-      const entryId = entryNode?.id || '';
-      const stateKeys = getStartStateKeysForCode();
-      const configuredStartKeys = getConfiguredStartStateKeys();
-
-      const idToFn = {};
-      const functionBlocks = nodes.map((node, index) => {
-        const safeName = toIdentifier(node.data?.label, `node_${index + 1}`);
-        const functionName = `${safeName}_${node.id}`;
-        idToFn[node.id] = functionName;
-
-        if (node.data?.nodeType === 'prompt') {
-          const promptText = node.data?.prompt?.trim() || node.data?.label || 'Prompt';
-          return [
-            `const ${functionName} = async (state) => {`,
-            `  const prompt = ${JSON.stringify(promptText)};`,
-            "  return { ...state, prompt };",
-            '};',
-            '',
-          ].join('\n');
-        }
-
-        if (node.data?.nodeType === 'agent') {
-          const linkedRetrieverStores = getLinkedRetrieverStoreIds(node.id);
-          const linkedLlmModels = getLinkedLlmNodes(node.id).map(
-            (llmNode) => llmNode.data?.model || 'gpt-4.1-mini'
-          );
-          const linkedPromptTexts = getLinkedPromptNodes(node.id).map(
-            (promptNode) => promptNode.data?.prompt?.trim() || promptNode.data?.label || 'Prompt'
-          );
-          const linkedTools = getLinkedToolNodes(node.id).map((toolNode) => toolNode.data?.label || 'Tool');
-          const outputStateKey = String(node.data?.outputStateKey || 'result').trim() || 'result';
-          const outputWriteMode = String(node.data?.outputWriteMode || 'append').trim() || 'append';
-          return [
-            `const ${functionName} = async (state) => {`,
-            `  const baseSystemPrompt = ${JSON.stringify(node.data?.agentPrompt || '')};`,
-            `  const linkedPrompts = ${JSON.stringify(linkedPromptTexts)};`,
-            '  const systemPrompt = [baseSystemPrompt, ...linkedPrompts].filter(Boolean).join("\\n\\n");',
-            `  const llmModels = ${JSON.stringify(linkedLlmModels)};`,
-            `  const linkedTools = ${JSON.stringify(linkedTools)};`,
-            `  const retrieverStoreIds = ${JSON.stringify(linkedRetrieverStores)};`,
-            `  const outputStateKey = ${JSON.stringify(outputStateKey)};`,
-            `  const outputWriteMode = ${JSON.stringify(outputWriteMode)};`,
-            "  const model = llmModels[0] || state.defaultModel || 'gpt-4.1-mini';",
-            '  const tools = [',
-            "    ...linkedTools.map((name, index) => ({ name: `tool_${index + 1}`, description: String(name || 'Tool') })),",
-            "    ...retrieverStoreIds.map((storeId, index) => ({",
-            "      name: `retrieve_context_${index + 1}`,",
-            "      description: `Retrieve relevant context from OpenAI vector store ${storeId}.`,",
-            "      metadata: { type: 'retriever', provider: 'openai_vector_store', vectorStoreId: storeId },",
-            '    })),',
-            '  ];',
-            '  const agent = createAgent({',
-            "    model: `openai:${model}`,",
-            '    tools,',
-            '    systemPrompt,',
-            '  });',
-            '  const agentResult = await agent.invoke({',
-            '    messages: Array.isArray(state.conversation_messages) && state.conversation_messages.length',
-            '      ? state.conversation_messages',
-            '      : [{ role: "user", content: state.user_input || "" }],',
-            '  });',
-            '  const completion = getAgentResultText(agentResult);',
-            '  const nextMessages = Array.isArray(agentResult?.messages) ? agentResult.messages : state.conversation_messages;',
-            '  const previousValue = state?.[outputStateKey];',
-            '  const nextValue = (() => {',
-            "    if (outputStateKey === 'conversation_messages') {",
-            "      if (outputWriteMode === 'replace') return [{ role: 'assistant', content: completion }];",
-            '      return Array.isArray(nextMessages)',
-            '        ? nextMessages',
-            "        : [{ role: 'assistant', content: completion }];",
-            '    }',
-            "    if (outputWriteMode === 'replace') return completion;",
-            '    if (Array.isArray(previousValue)) return previousValue.concat(completion);',
-            "    if (typeof previousValue === 'string' && previousValue) return `${previousValue}\\n${completion}`;",
-            "    if (previousValue == null || previousValue === '') return completion;",
-            '    return [previousValue, completion];',
-            '  })();',
-            `  return { ...state, last_agent: ${JSON.stringify(node.data?.label || 'Agent')}, [outputStateKey]: nextValue, result: completion, systemPrompt, conversation_messages: nextMessages };`,
-            '};',
-            '',
-          ].join('\n');
-        }
-
-        if (node.data?.nodeType === 'llm') {
-          const linkedRetrieverStores = getLinkedRetrieverStoreIds(node.id);
-          return [
-            `const ${functionName} = async (state) => {`,
-            `  const retrieverStoreIds = ${JSON.stringify(linkedRetrieverStores)};`,
-            '  const model = ' + JSON.stringify(node.data?.model || 'gpt-4.1-mini') + ';',
-            '  const completion = await runModel({',
-            '    apiKey: state.apiKey || "",',
-            '    model,',
-            '    systemPrompt: state.systemPrompt || "",',
-            '    userInput: state.user_input || "",',
-            '    messages: state.conversation_messages || [],',
-            '    retrieverStoreIds,',
-            '    linkedTools: [],',
-            '  });',
-            '  return { ...state, last_llm: model, result: completion };',
-            '};',
-            '',
-          ].join('\n');
-        }
-
-        if (node.data?.nodeType === 'condition') {
-          const branchLabels = parseBranches(node.data?.branches);
-          const fallbackRoute = branchLabels[0] || 'default';
-          const conditionKind = node.data?.conditionKind || 'custom';
-          return [
-            `const ${functionName} = async (state) => {`,
-            `  // Condition type: ${conditionKind}`,
-            `  return { ...state, route: state.route || ${JSON.stringify(fallbackRoute)} };`,
-            '};',
-            '',
-          ].join('\n');
-        }
-
-        if (node.data?.nodeType === 'tool') {
-          if (node.data?.toolKind === 'retriever') {
-            return [
-              `const ${functionName} = async (state) => {`,
-              `  const vectorStoreId = ${JSON.stringify(node.data?.retriever?.vectorStoreId || '')};`,
-              '  return { ...state, retriever_store_id: vectorStoreId };',
-              '};',
-              '',
-            ].join('\n');
-          }
-          return [
-            `const ${functionName} = async (state) => {`,
-            '  return state;',
-            '};',
-            '',
-          ].join('\n');
-        }
-
-        if (node.data?.nodeType === 'start') {
-          const startInitProps = configuredStartKeys.map(
-            (item) =>
-              `'${item.key}': state['${item.key}'] ?? ${getStartStateDefaultLiteral(item.key, 'js')}`
-          );
-          const startReturnExpr = startInitProps.length
-            ? `{ ...state, ${startInitProps.join(', ')} }`
-            : '{ ...state }';
-          return [
-            `const ${functionName} = async (state) => {`,
-            `  return ${startReturnExpr};`,
-            '};',
-            '',
-          ].join('\n');
-        }
-
-        return [
-          `const ${functionName} = async (state) => {`,
-          '  return state;',
-          '};',
-          '',
-        ].join('\n');
-      });
-
-      const conditionNodeIds = new Set(
-        nodes.filter((node) => node.data?.nodeType === 'condition').map((node) => node.id)
-      );
-      const edgeLines = edgePairs
-        .filter(([source]) => !conditionNodeIds.has(source))
-        .map(([source, target]) => {
-          const sourceFn = idToFn[source];
-          const targetFn = idToFn[target];
-          return sourceFn && targetFn ? `graph.addEdge(${JSON.stringify(sourceFn)}, ${JSON.stringify(targetFn)});` : '';
-        })
-        .filter(Boolean)
-        .join('\n');
-
-      const conditionalEdgeLines = nodes
-        .filter((node) => node.data?.nodeType === 'condition')
-        .map((conditionNode) => {
-          const sourceFn = idToFn[conditionNode.id];
-          const targetIds = outgoingBySource.get(conditionNode.id) || [];
-          if (!sourceFn || targetIds.length === 0) {
-            return '';
-          }
-          const labels = parseBranches(conditionNode.data?.branches);
-          const mapLines = targetIds
-            .map((targetId, index) => {
-              const targetFn = idToFn[targetId];
-              if (!targetFn) {
-                return null;
-              }
-              const label = labels[index] || `branch_${index + 1}`;
-              return `    ${JSON.stringify(label)}: ${JSON.stringify(targetFn)}`;
-            })
-            .filter(Boolean)
-            .join(',\n');
-          return [
-            `graph.addConditionalEdges(${JSON.stringify(sourceFn)}, (state) => state.route || ${JSON.stringify(labels[0] || 'branch_1')}, {`,
-            mapLines,
-            '});',
-          ].join('\n');
-        })
-        .filter(Boolean)
-        .join('\n');
-
-      const entryFn = entryId && idToFn[entryId] ? idToFn[entryId] : Object.values(idToFn)[0];
-      const jsStatePropertyLines = stateKeys.map(
-        (key) => ` * @property {${getJsDocTypeByType(getStateDatatype(key))}} ${key}`
-      );
-      return [
-        '// Runtime-provided: StateGraph, END, runModel, createAgent',
-        '',
-        '/**',
-        ' * @typedef {Object} State',
-        ...jsStatePropertyLines,
-        ' * @property {string=} system_api_key',
-        ' * @property {boolean=} has_system_api_key',
-        ' */',
-        '',
-        'const getAgentResultText = (result) => {',
-        '  if (!result) return "";',
-        '  if (typeof result.output_text === "string") return result.output_text;',
-        '  if (typeof result.result === "string") return result.result;',
-        '  if (Array.isArray(result.messages)) {',
-        '    for (let i = result.messages.length - 1; i >= 0; i -= 1) {',
-        '      const msg = result.messages[i];',
-        '      if (msg?.role === "assistant" && typeof msg.content === "string" && msg.content.trim()) {',
-        '        return msg.content;',
-        '      }',
-        '      if (Array.isArray(msg?.content)) {',
-        '        const textPart = msg.content.find((part) => typeof part?.text === "string" && part.text.trim());',
-        '        if (textPart?.text) return textPart.text;',
-        '      }',
-        '    }',
-        '  }',
-        '  if (typeof result.content === "string") return result.content;',
-        '  if (Array.isArray(result.content)) {',
-        '    const textPart = result.content.find((part) => typeof part?.text === "string" && part.text.trim());',
-        '    if (textPart?.text) return textPart.text;',
-        '  }',
-        '  return "";',
-        '};',
-        '',
-        ...functionBlocks,
-        'const graph = new StateGraph({});',
-        ...Object.values(idToFn).map((functionName) => `graph.addNode(${JSON.stringify(functionName)}, ${functionName});`),
-        edgeLines,
-        conditionalEdgeLines,
-        entryFn ? `graph.setEntryPoint(${JSON.stringify(entryFn)});` : '',
-        'const app = graph.compile();',
-      ]
-        .filter(Boolean)
-        .join('\n');
-    },
+    (startAgentId) =>
+      buildLangGraphJsPreview({
+        nodes,
+        edges,
+        startAgentId,
+        getStartStateKeysForCode,
+        getConfiguredStartStateKeys,
+        getLinkedRetrieverStoreIds,
+        getLinkedLlmNodes,
+        getLinkedPromptNodes,
+        getLinkedToolNodes,
+        getStartStateDefaultLiteral,
+        getStateDatatype,
+        helpers: {
+          parseStructuredOutputSchemaText,
+          parseBranches,
+          getJsDocTypeByType,
+        },
+      }),
     [
       nodes,
       edges,
@@ -2070,6 +1730,31 @@ function FlowBuilder() {
 
     return '';
   }, []);
+  const getStructuredResponse = useCallback((payload) => {
+    if (payload?.output_parsed && typeof payload.output_parsed === 'object') {
+      return payload.output_parsed;
+    }
+    const chunks = payload?.output || [];
+    for (const item of chunks) {
+      const content = item?.content || [];
+      for (const part of content) {
+        if (part?.parsed && typeof part.parsed === 'object') {
+          return part.parsed;
+        }
+        if (part?.json && typeof part.json === 'object') {
+          return part.json;
+        }
+        if (typeof part?.text === 'string') {
+          try {
+            return JSON.parse(part.text);
+          } catch (error) {
+            // Ignore non-JSON text chunks.
+          }
+        }
+      }
+    }
+    return null;
+  }, []);
   const getTextFromStateValue = useCallback((value) => {
     if (typeof value === 'string') {
       return value.trim();
@@ -2108,6 +1793,45 @@ function FlowBuilder() {
     }
     return '';
   }, []);
+  const searchOpenAIVectorStore = useCallback(
+    (params) => searchVectorStore(params),
+    []
+  );
+  const buildCompiledLangGraphApp = useCallback(
+    (params) =>
+      compileLangGraphApp({
+        loadLangChainRuntime,
+        nodes,
+        edges,
+        getStartStateKeysForCode,
+        getConfiguredStartStateKeys,
+        getLinkedRetrieverStoreIds,
+        getLinkedLlmNodes,
+        getLinkedPromptNodes,
+        getLinkedToolNodes,
+        parseStructuredOutputSchemaText,
+        parseBranches,
+        getDefaultStateValueByType,
+        getTextFromStateValue,
+        toLangChainMessages,
+        getLangChainMessageText,
+        searchOpenAIVectorStoreImpl: searchOpenAIVectorStore,
+        ...params,
+      }),
+    [
+      loadLangChainRuntime,
+      nodes,
+      edges,
+      getStartStateKeysForCode,
+      getConfiguredStartStateKeys,
+      getLinkedRetrieverStoreIds,
+      getLinkedLlmNodes,
+      getLinkedPromptNodes,
+      getLinkedToolNodes,
+      searchOpenAIVectorStore,
+      getTextFromStateValue,
+    ]
+  );
 
   const startAgentForPreview = findStartAgent();
   const startInputForPreview = findStartInputNode();
@@ -2119,6 +1843,42 @@ function FlowBuilder() {
     () => generateLangGraphJsCode(startInputForPreview?.id || startAgentForPreview?.id),
     [generateLangGraphJsCode, startInputForPreview, startAgentForPreview]
   );
+  const activeCode = codeTab === 'js' ? langGraphJsCode : langGraphPythonCode;
+  const activeCodeFileName = codeTab === 'js' ? 'chihflow-graph.js' : 'chihflow-graph.py';
+
+  const onCopyCode = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(activeCode);
+      setCodeActionMessage('程式碼已複製');
+    } catch (error) {
+      setCodeActionMessage('複製失敗，請檢查瀏覽器權限');
+    }
+  }, [activeCode]);
+
+  const onDownloadCode = useCallback(() => {
+    const blob = new Blob([activeCode], {
+      type: codeTab === 'js' ? 'text/javascript;charset=utf-8' : 'text/x-python;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = activeCodeFileName;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+    setCodeActionMessage(`已下載 ${activeCodeFileName}`);
+  }, [activeCode, activeCodeFileName, codeTab]);
+
+  useEffect(() => {
+    if (!codeActionMessage) {
+      return undefined;
+    }
+    const timerId = window.setTimeout(() => {
+      setCodeActionMessage('');
+    }, 1800);
+    return () => window.clearTimeout(timerId);
+  }, [codeActionMessage]);
 
   const onRunFlow = useCallback(async () => {
     const userMessage = chatInput.trim();
@@ -2152,7 +1912,11 @@ function FlowBuilder() {
       .concat({ role: 'user', content: userMessage });
 
     try {
-      const startAgentSystemPrompt = buildAgentSystemPrompt(startAgent.id, startAgent.data?.agentPrompt || '');
+      nodes
+        .filter((node) => node.data?.nodeType === 'agent' && node.data?.structuredOutputEnabled)
+        .forEach((node) => {
+          parseStructuredOutputSchemaText(node.data?.structuredOutputSchemaText);
+        });
       const systemNode = findSystemNode();
       const globalApiKeyFromVars = getSystemVarValue(systemNode, 'OPENAI_API_KEY').trim();
       const linkedLlmNodes = getLinkedLlmNodes(startAgent.id);
@@ -2162,215 +1926,24 @@ function FlowBuilder() {
         globalApiKeyFromVars ||
         systemNode?.data?.globalApiKey?.trim();
       const model = primaryLlmNode?.data?.model || 'gpt-4.1-mini';
-      const runtimeCode = generateLangGraphJsCode(startInputForPreview?.id || startAgent.id);
-      let assistantText = '';
-
-      const runModel = async ({
-        apiKey: runApiKey,
-        model: runModelName,
-        systemPrompt,
-        userInput,
-        messages,
-        retrieverStoreIds,
-        linkedTools: runLinkedTools,
-        retrievedContext,
-      }) => {
-        if (!runApiKey) {
-          return '';
-        }
-        const normalizedModel = String(runModelName || model)
-          .replace(/^openai:/, '')
-          .trim();
-        const fullSystemPrompt = [
-          'You are an assistant running from JS LangGraph execution.',
-          systemPrompt || '',
-          runLinkedTools?.length ? `Linked tools: ${runLinkedTools.join(', ')}` : '',
-          retrieverStoreIds?.length
-            ? `Linked retriever vector stores: ${retrieverStoreIds.join(', ')}`
-            : '',
-          retrievedContext
-            ? ['Retrieved context (RAG):', retrievedContext].join('\n')
-            : '',
-          globalApiKeyFromVars || systemNode?.data?.globalApiKey
-            ? 'System node provides global API key.'
-            : '',
-          'Generated graph code:',
-          '```javascript',
-          runtimeCode,
-          '```',
-        ]
-          .filter(Boolean)
-          .join('\n');
-        const normalizedMessages = Array.isArray(messages)
-          ? messages
-              .map((message) => {
-                const role = ['system', 'assistant', 'user'].includes(message?.role)
-                  ? message.role
-                  : 'user';
-                const content = Array.isArray(message?.content)
-                  ? message.content
-                      .map((part) =>
-                        typeof part?.text === 'string'
-                          ? part.text
-                          : typeof part === 'string'
-                            ? part
-                            : ''
-                      )
-                      .filter(Boolean)
-                      .join('\n')
-                  : String(message?.content || '');
-                return { role, content };
-              })
-              .filter((message) => message.content.trim())
-          : [];
-        const modelInput = [{ role: 'system', content: fullSystemPrompt }]
-          .concat(
-            normalizedMessages.length > 0
-              ? normalizedMessages
-              : [{ role: 'user', content: userInput || '' }]
-          );
-
-        const response = await fetch('https://api.openai.com/v1/responses', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${runApiKey}`,
-          },
-          body: JSON.stringify({
-            model: normalizedModel || model,
-            input: modelInput,
-          }),
-        });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`OpenAI request failed: ${response.status} ${errorText}`);
-        }
-
-        const payload = await response.json();
-        return getResponseText(payload);
-      };
-
-      const searchOpenAIVectorStore = async ({
-        runApiKey,
-        vectorStoreId,
-        query,
-        maxNumResults = 4,
-      }) => {
-        if (!runApiKey || !vectorStoreId || !query) {
-          return [];
-        }
-
-        const response = await fetch(
-          `https://api.openai.com/v1/vector_stores/${encodeURIComponent(vectorStoreId)}/search`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Authorization: `Bearer ${runApiKey}`,
-            },
-            body: JSON.stringify({
-              query,
-              max_num_results: maxNumResults,
-            }),
-          }
-        );
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          throw new Error(`Vector store search failed: ${response.status} ${errorText}`);
-        }
-
-        const payload = await response.json();
-        const rows = Array.isArray(payload?.data) ? payload.data : [];
-        return rows
-          .map((row) => {
-            if (typeof row?.content === 'string') {
-              return row.content.trim();
-            }
-            if (Array.isArray(row?.content)) {
-              const merged = row.content
-                .map((part) => {
-                  if (typeof part?.text === 'string') {
-                    return part.text;
-                  }
-                  if (typeof part?.content === 'string') {
-                    return part.content;
-                  }
-                  return '';
-                })
-                .filter(Boolean)
-                .join('\n')
-                .trim();
-              return merged;
-            }
-            return '';
-          })
-          .filter(Boolean);
-      };
-
-      const createAgent = ({ model: agentModel, tools = [], systemPrompt = '' }) => ({
-        invoke: async ({ messages = [] }) => {
-          const lastUser = [...messages]
-            .reverse()
-            .find((message) => message?.role === 'user' && message?.content != null);
-          const userInput = Array.isArray(lastUser?.content)
-            ? lastUser.content
-                .map((part) => (typeof part?.text === 'string' ? part.text : ''))
-                .join('\n')
-                .trim()
-            : String(lastUser?.content || '');
-          const retrieverStoreIds = tools
-            .filter((tool) => tool?.metadata?.type === 'retriever')
-            .map((tool) => tool?.metadata?.vectorStoreId)
-            .filter((storeId) => typeof storeId === 'string' && storeId.trim());
-          const linkedTools = tools
-            .map((tool) => tool?.description || tool?.name || '')
-            .filter(Boolean);
-          let retrievedContext = '';
-          if (retrieverStoreIds.length > 0 && userInput) {
-            const chunks = [];
-            for (const storeId of retrieverStoreIds) {
-              const rows = await searchOpenAIVectorStore({
-                runApiKey: apiKey || '',
-                vectorStoreId: storeId,
-                query: userInput,
-              });
-              if (rows.length > 0) {
-                chunks.push(`[vector_store:${storeId}]`);
-                chunks.push(...rows);
-              }
-            }
-            retrievedContext = chunks.join('\n\n');
-          }
-          const text = await runModel({
-            apiKey: apiKey || '',
-            model: agentModel || model,
-            systemPrompt,
-            userInput,
-            messages,
-            retrieverStoreIds,
-            linkedTools,
-            retrievedContext,
-          });
-          return {
-            output_text: text,
-            messages: messages.concat({ role: 'assistant', content: text }),
-          };
-        },
+      const compiledApp = await buildCompiledLangGraphApp({
+        startAgentId: startInputForPreview?.id || startAgent.id,
+        apiKey,
+        defaultModel: model,
+        systemApiKey: globalApiKeyFromVars || systemNode?.data?.globalApiKey?.trim(),
       });
-
-      const finalState = await executeGeneratedGraph(runtimeCode, runModel, createAgent, {
+      const finalState = await compiledApp.invoke({
         user_input: userMessage,
         apiKey,
         defaultModel: model,
-        systemPrompt: startAgentSystemPrompt,
+        systemPrompt: buildAgentSystemPrompt(startAgent.id, startAgent.data?.agentPrompt || ''),
+        system_api_key: globalApiKeyFromVars || systemNode?.data?.globalApiKey?.trim() || '',
         conversation_messages: conversationMessages,
       });
 
       const agentOutputKey = String(startAgent?.data?.outputStateKey || 'result').trim() || 'result';
       const rawAssistantValue = finalState?.[agentOutputKey];
-      assistantText =
+      const assistantText =
         getTextFromStateValue(rawAssistantValue) ||
         getTextFromStateValue(finalState?.result) ||
         String(finalState?.result || '').trim();
@@ -2394,16 +1967,18 @@ function FlowBuilder() {
     buildAgentSystemPrompt,
     findSystemNode,
     getLinkedLlmNodes,
-    generateLangGraphCode,
-    generateLangGraphJsCode,
-    getResponseText,
+    buildCompiledLangGraphApp,
     getTextFromStateValue,
     startInputForPreview,
+    nodes,
   ]);
 
   return (
     <div
       className={`builder-layout${isSidebarCollapsed ? ' sidebar-collapsed' : ''}${isSettingsCollapsed ? ' settings-collapsed' : ''}`}
+      style={{
+        gridTemplateColumns: `${isSidebarCollapsed ? 72 : sidebarWidth}px 1fr ${isSettingsCollapsed ? 72 : settingsWidth}px`,
+      }}
     >
       <aside className={`sidebar${isSidebarCollapsed ? ' collapsed' : ''}`}>
         <div className="panel-header">
@@ -2519,19 +2094,34 @@ function FlowBuilder() {
             <button
               type="button"
               className={codeTab === 'js' ? 'code-tab active' : 'code-tab'}
-              onClick={() => setCodeTab('js')}
+              onClick={() => {
+                setCodeTab('js');
+                setCodeActionMessage('');
+              }}
             >
               JS
             </button>
             <button
               type="button"
               className={codeTab === 'python' ? 'code-tab active' : 'code-tab'}
-              onClick={() => setCodeTab('python')}
+              onClick={() => {
+                setCodeTab('python');
+                setCodeActionMessage('');
+              }}
             >
               Python
             </button>
           </div>
-          <pre className="langgraph-code">{codeTab === 'js' ? langGraphJsCode : langGraphPythonCode}</pre>
+          <div className="code-actions">
+            <button type="button" className="code-action-button" onClick={onCopyCode}>
+              複製程式碼
+            </button>
+            <button type="button" className="code-action-button secondary" onClick={onDownloadCode}>
+              下載 {codeTab === 'js' ? '.js' : '.py'}
+            </button>
+            {codeActionMessage && <span className="code-action-message">{codeActionMessage}</span>}
+          </div>
+          <pre className="langgraph-code">{activeCode}</pre>
           <div className="chat-messages">
             {chatHistory.length === 0 && (
               <p className="chat-empty">目前沒有訊息。輸入內容後執行流程。</p>
@@ -2560,6 +2150,14 @@ function FlowBuilder() {
           {runnerError && <p className="runner-error">{runnerError}</p>}
         </div>
         </div>}
+        {!isSidebarCollapsed && (
+          <div
+            role="separator"
+            aria-label="調整 ChihFlow 面板寬度"
+            className="panel-resizer panel-resizer-right"
+            onMouseDown={onSidebarResizeMouseDown}
+          />
+        )}
       </aside>
 
       <main className="canvas-wrap" ref={wrapperRef}>
@@ -2584,6 +2182,14 @@ function FlowBuilder() {
       </main>
 
       <aside className={`settings-panel${isSettingsCollapsed ? ' collapsed' : ''}`}>
+        {!isSettingsCollapsed && (
+          <div
+            role="separator"
+            aria-label="調整 Node Setting 面板寬度"
+            className="panel-resizer panel-resizer-left"
+            onMouseDown={onSettingsResizeMouseDown}
+          />
+        )}
         <div className="panel-header">
           {!isSettingsCollapsed && <h2>節點設定</h2>}
           <button
@@ -2836,6 +2442,75 @@ function FlowBuilder() {
                     <option value="replace">replace（覆蓋）</option>
                   </select>
                 </label>
+
+                <label>
+                  Structured Output
+                  <select
+                    value={selectedNode.data?.structuredOutputEnabled ? 'enabled' : 'disabled'}
+                    onChange={(event) =>
+                      updateNodeData(selectedNode.id, {
+                        structuredOutputEnabled: event.target.value === 'enabled',
+                      })
+                    }
+                  >
+                    <option value="disabled">關閉</option>
+                    <option value="enabled">啟用</option>
+                  </select>
+                </label>
+
+                {selectedNode.data?.structuredOutputEnabled && (
+                  <>
+                    <label>
+                      Structured Output Strategy
+                      <select
+                        value={selectedNode.data?.structuredOutputStrategy || 'auto'}
+                        onChange={(event) =>
+                          updateNodeData(selectedNode.id, {
+                            structuredOutputStrategy: event.target.value,
+                          })
+                        }
+                      >
+                        <option value="auto">auto</option>
+                        <option value="provider">provider</option>
+                        <option value="tool">tool</option>
+                      </select>
+                    </label>
+
+                    <label>
+                      Structured Output State Key
+                      <input
+                        type="text"
+                        placeholder="structured_response"
+                        value={selectedNode.data?.structuredOutputStateKey || 'structured_response'}
+                        onChange={(event) =>
+                          updateNodeData(selectedNode.id, {
+                            structuredOutputStateKey: event.target.value,
+                          })
+                        }
+                      />
+                    </label>
+
+                    <label>
+                      Structured Output Schema
+                      <textarea
+                        rows={10}
+                        placeholder='{"type":"object","properties":{"answer":{"type":"string"}}}'
+                        value={
+                          selectedNode.data?.structuredOutputSchemaText ||
+                          createDefaultStructuredOutputSchemaText()
+                        }
+                        onChange={(event) =>
+                          updateNodeData(selectedNode.id, {
+                            structuredOutputSchemaText: event.target.value,
+                          })
+                        }
+                      />
+                    </label>
+                    <p className="settings-note">
+                      參考 LangChain `structured_response`，目前執行時會透過 OpenAI JSON Schema 輸出，並寫入指定 state key。
+                    </p>
+                  </>
+                )}
 
                 <p className="settings-note">接收到的 State Keys</p>
                 <div className="start-key-list">
