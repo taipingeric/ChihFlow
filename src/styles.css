@@ -18,28 +18,25 @@ body,
 
 .builder-layout {
   display: grid;
-  grid-template-columns: 290px 1fr 320px;
   width: 100%;
   height: 100%;
   min-height: 0;
 }
 
 .builder-layout.sidebar-collapsed {
-  grid-template-columns: 72px 1fr 320px;
 }
 
 .builder-layout.settings-collapsed {
-  grid-template-columns: 290px 1fr 72px;
 }
 
 .builder-layout.sidebar-collapsed.settings-collapsed {
-  grid-template-columns: 72px 1fr 72px;
 }
 
 .sidebar {
   display: flex;
   flex-direction: column;
   gap: 16px;
+  position: relative;
   padding: 20px;
   border-right: 1px solid #e4e4e7;
   background: linear-gradient(180deg, #fff7ed 0%, #ffffff 50%, #f8fafc 100%);
@@ -238,6 +235,34 @@ body,
   gap: 8px;
 }
 
+.code-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.code-action-button {
+  border: 1px solid #18181b;
+  border-radius: 8px;
+  background: #18181b;
+  color: #fff;
+  padding: 6px 10px;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+
+.code-action-button.secondary {
+  border-color: #d4d4d8;
+  background: #fff;
+  color: #18181b;
+}
+
+.code-action-message {
+  font-size: 0.78rem;
+  color: #52525b;
+}
+
 .code-tab {
   border: 1px solid #d4d4d8;
   border-radius: 8px;
@@ -397,6 +422,7 @@ body,
 .settings-panel {
   display: flex;
   flex-direction: column;
+  position: relative;
   padding: 20px;
   border-left: 1px solid #e4e4e7;
   background: #ffffff;
@@ -437,6 +463,42 @@ body,
   font-size: 1rem;
   cursor: pointer;
   flex-shrink: 0;
+}
+
+.panel-resizer {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 10px;
+  z-index: 30;
+  cursor: col-resize;
+}
+
+.panel-resizer::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 4px;
+  width: 2px;
+  border-radius: 999px;
+  background: rgba(161, 161, 170, 0.45);
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.sidebar:hover .panel-resizer::before,
+.settings-panel:hover .panel-resizer::before,
+.panel-resizer:hover::before {
+  opacity: 1;
+}
+
+.panel-resizer-right {
+  right: -5px;
+}
+
+.panel-resizer-left {
+  left: -5px;
 }
 
 .sidebar-scroll,
@@ -527,6 +589,58 @@ body,
 .react-flow__node-agentNode.selected,
 .react-flow__node-systemNode.selected {
   box-shadow: none;
+}
+
+.react-flow__node-agentNode,
+.react-flow__node-systemNode,
+.react-flow__node-startNode,
+.react-flow__node-llmNode,
+.react-flow__node-toolNode,
+.react-flow__node-promptNode,
+.react-flow__node-outputNode,
+.react-flow__node-groupNode,
+.react-flow__node-default {
+  transition: box-shadow 0.1s ease, filter 0.1s ease;
+}
+
+.react-flow__node-agentNode.selected,
+.react-flow__node-systemNode.selected,
+.react-flow__node-startNode.selected,
+.react-flow__node-llmNode.selected,
+.react-flow__node-toolNode.selected,
+.react-flow__node-promptNode.selected,
+.react-flow__node-outputNode.selected,
+.react-flow__node-groupNode.selected,
+.react-flow__node-default.selected {
+  filter: saturate(1.02);
+  box-shadow: 0 8px 18px rgba(24, 24, 27, 0.12);
+  z-index: 5;
+}
+
+.react-flow__node-agentNode.selected > div,
+.react-flow__node-systemNode.selected > div,
+.react-flow__node-startNode.selected > div,
+.react-flow__node-llmNode.selected > div,
+.react-flow__node-toolNode.selected > div,
+.react-flow__node-promptNode.selected > div,
+.react-flow__node-outputNode.selected > div,
+.react-flow__node-groupNode.selected > div,
+.react-flow__node-default.selected > div {
+  box-shadow: 0 0 0 2px rgba(24, 24, 27, 0.1);
+}
+
+.react-flow__node-agentNode.selected .flow-handle,
+.react-flow__node-systemNode.selected .flow-handle,
+.react-flow__node-startNode.selected .flow-handle,
+.react-flow__node-llmNode.selected .flow-handle,
+.react-flow__node-toolNode.selected .flow-handle,
+.react-flow__node-promptNode.selected .flow-handle,
+.react-flow__node-outputNode.selected .flow-handle,
+.react-flow__node-groupNode.selected .flow-handle,
+.react-flow__node-default.selected .flow-handle {
+  border-color: #18181b !important;
+  background: #fff7ed !important;
+  box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.12);
 }
 
 @media (max-width: 900px) {

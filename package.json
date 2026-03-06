@@ -9,12 +9,17 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@langchain/core": "^1.1.31",
+    "@langchain/langgraph": "^1.2.0",
+    "@langchain/openai": "^1.2.12",
+    "langchain": "^1.2.30",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "reactflow": "^11.11.4"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.3",
-    "vite": "^5.4.8"
+    "vite": "^5.4.8",
+    "vite-plugin-node-polyfills": "^0.25.0"
   }
 }
