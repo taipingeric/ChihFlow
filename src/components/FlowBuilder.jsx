@@ -145,6 +145,8 @@ const initialNodes = [
       model: 'gpt-4.1-mini',
       apiKey: '',
       agentPrompt: 'You are a helpful assistant.',
+      outputStateKey: 'result',
+      outputWriteMode: 'append',
     },
   },
   {
@@ -494,10 +496,37 @@ function GroupCanvasNode({ data }) {
   );
 }
 
+const getMiniMapNodeColor = (node) => {
+  switch (node?.data?.nodeType) {
+    case 'agent':
+      return '#f6d8ae';
+    case 'system':
+      return '#ede9fe';
+    case 'start':
+      return '#dbeafe';
+    case 'llm':
+      return '#fee2e2';
+    case 'tool':
+      return '#e0f2fe';
+    case 'prompt':
+      return '#fef3c7';
+    case 'output':
+      return '#fce7f3';
+    case 'group':
+      return '#e5e7eb';
+    case 'condition':
+      return '#dcfce7';
+    default:
+      return '#d4d4d8';
+  }
+};
+
 function FlowBuilder() {
   const wrapperRef = useRef(null);
   const [reactFlowInstance, setReactFlowInstance] = useState(null);
   const [selectedNodeId, setSelectedNodeId] = useState('1');
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
+  const [isSettingsCollapsed, setIsSettingsCollapsed] = useState(false);
   const [showConditionOptions, setShowConditionOptions] = useState(false);
   const [showToolOptions, setShowToolOptions] = useState(false);
   const [codeTab, setCodeTab] = useState('js');
@@ -631,6 +660,8 @@ function FlowBuilder() {
           apiKey: '',
           prompt: '',
           agentPrompt: paletteNode.type === 'agent' ? 'You are a helpful assistant.' : '',
+          outputStateKey: paletteNode.type === 'agent' ? 'result' : '',
+          outputWriteMode: paletteNode.type === 'agent' ? 'append' : '',
           globalApiKey: paletteNode.type === 'system' ? '' : '',
           systemVars:
             paletteNode.type === 'system' ? createDefaultSystemVars() : [],
@@ -848,6 +879,10 @@ function FlowBuilder() {
     const configuredKeys = (startNode?.data?.startStateKeys || [])
       .map((item) => String(item?.key || '').trim())
       .filter(Boolean);
+    const agentOutputKeys = nodes
+      .filter((node) => node.data?.nodeType === 'agent')
+      .map((node) => String(node.data?.outputStateKey || '').trim())
+      .filter(Boolean);
     const requiredKeys = [
       'user_input',
       'prompt',
@@ -861,7 +896,7 @@ function FlowBuilder() {
       'defaultModel',
       'systemPrompt',
     ];
-    return Array.from(new Set(requiredKeys.concat(configuredKeys)));
+    return Array.from(new Set(requiredKeys.concat(configuredKeys, agentOutputKeys)));
   }, [nodes]);
   const getConfiguredStartStateKeys = useCallback(() => {
     const startNode = nodes.find((node) => node.data?.nodeType === 'start') || null;
@@ -1115,6 +1150,41 @@ function FlowBuilder() {
       getIncomingNodes(targetNodeId).filter((sourceNode) => sourceNode?.data?.nodeType === 'prompt'),
     [getIncomingNodes]
   );
+  const getNodeOutputStateKeys = useCallback((node) => {
+    if (!node?.data?.nodeType) {
+      return [];
+    }
+    switch (node.data.nodeType) {
+      case 'start':
+        return (node.data?.startStateKeys || [])
+          .map((item) => String(item?.key || '').trim())
+          .filter(Boolean);
+      case 'prompt':
+        return ['prompt'];
+      case 'tool':
+        return node.data?.toolKind === 'retriever' ? ['retriever_store_id'] : [];
+      case 'llm':
+        return ['last_llm', 'result'];
+      case 'condition':
+        return ['route'];
+      case 'system':
+        return ['has_system_api_key'];
+      case 'agent': {
+        const outputKey = String(node.data?.outputStateKey || 'result').trim() || 'result';
+        return ['last_agent', 'result', 'systemPrompt', 'conversation_messages', outputKey];
+      }
+      default:
+        return [];
+    }
+  }, []);
+  const getIncomingStateKeys = useCallback(
+    (targetNodeId) => {
+      const incomingNodes = getIncomingNodes(targetNodeId);
+      const keys = incomingNodes.flatMap((sourceNode) => getNodeOutputStateKeys(sourceNode));
+      return Array.from(new Set(keys));
+    },
+    [getIncomingNodes, getNodeOutputStateKeys]
+  );
   const buildAgentSystemPrompt = useCallback(
     (agentNodeId, basePrompt = '') => {
       const linkedPromptTexts = getLinkedPromptNodes(agentNodeId)
@@ -1278,6 +1348,8 @@ function FlowBuilder() {
             (promptNode) => promptNode.data?.prompt?.trim() || promptNode.data?.label || 'Prompt'
           );
           const linkedTools = getLinkedToolNodes(node.id).map((toolNode) => toolNode.data?.label || 'Tool');
+          const outputStateKey = String(node.data?.outputStateKey || 'result').trim() || 'result';
+          const outputWriteMode = String(node.data?.outputWriteMode || 'append').trim() || 'append';
           return [
             `def ${functionName}(state: State):`,
             `    base_system_prompt = ${JSON.stringify(node.data?.agentPrompt || '')}`,
@@ -1286,6 +1358,8 @@ function FlowBuilder() {
             `    llm_models = ${JSON.stringify(linkedLlmModels)}`,
             `    linked_tools = ${JSON.stringify(linkedTools)}`,
             `    retriever_store_ids = ${JSON.stringify(linkedRetrieverStores)}`,
+            `    output_state_key = ${JSON.stringify(outputStateKey)}`,
+            `    output_write_mode = ${JSON.stringify(outputWriteMode)}`,
             "    model = llm_models[0] if llm_models else state.get('default_model', 'gpt-4.1-mini')",
             "    tools = []  # TODO: map linked tools/retrievers to real LangChain tools",
             '    agent = create_agent(',
@@ -1295,7 +1369,27 @@ function FlowBuilder() {
             '    )',
             "    result = agent.invoke({'messages': [{'role': 'user', 'content': state.get('user_input', '')}]})",
             "    text = result.get('output_text', '') if isinstance(result, dict) else ''",
-            "    return {**state, 'last_agent': " + JSON.stringify(node.data?.label || 'Agent') + ", 'result': text}",
+            "    previous_value = state.get(output_state_key)",
+            "    if output_state_key == 'conversation_messages':",
+            "        assistant_message = {'role': 'assistant', 'content': text}",
+            "        previous_messages = state.get('conversation_messages') if isinstance(state.get('conversation_messages'), list) else []",
+            "        if output_write_mode == 'replace':",
+            '            next_value = [assistant_message]',
+            '        else:',
+            '            next_value = [*previous_messages, assistant_message]',
+            "    elif output_write_mode == 'replace':",
+            '        next_value = text',
+            "    elif isinstance(previous_value, list):",
+            '        next_value = [*previous_value, text]',
+            "    elif isinstance(previous_value, str) and previous_value:",
+            "        next_value = f'{previous_value}\\n{text}'",
+            "    elif previous_value in (None, ''):",
+            '        next_value = text',
+            '    else:',
+            '        next_value = [previous_value, text]',
+            "    return {**state, 'last_agent': " +
+              JSON.stringify(node.data?.label || 'Agent') +
+              ", output_state_key: next_value, 'result': text}",
             '',
           ].join('\n');
         }
@@ -1517,6 +1611,8 @@ function FlowBuilder() {
             (promptNode) => promptNode.data?.prompt?.trim() || promptNode.data?.label || 'Prompt'
           );
           const linkedTools = getLinkedToolNodes(node.id).map((toolNode) => toolNode.data?.label || 'Tool');
+          const outputStateKey = String(node.data?.outputStateKey || 'result').trim() || 'result';
+          const outputWriteMode = String(node.data?.outputWriteMode || 'append').trim() || 'append';
           return [
             `const ${functionName} = async (state) => {`,
             `  const baseSystemPrompt = ${JSON.stringify(node.data?.agentPrompt || '')};`,
@@ -1525,6 +1621,8 @@ function FlowBuilder() {
             `  const llmModels = ${JSON.stringify(linkedLlmModels)};`,
             `  const linkedTools = ${JSON.stringify(linkedTools)};`,
             `  const retrieverStoreIds = ${JSON.stringify(linkedRetrieverStores)};`,
+            `  const outputStateKey = ${JSON.stringify(outputStateKey)};`,
+            `  const outputWriteMode = ${JSON.stringify(outputWriteMode)};`,
             "  const model = llmModels[0] || state.defaultModel || 'gpt-4.1-mini';",
             '  const tools = [',
             "    ...linkedTools.map((name, index) => ({ name: `tool_${index + 1}`, description: String(name || 'Tool') })),",
@@ -1546,7 +1644,21 @@ function FlowBuilder() {
             '  });',
             '  const completion = getAgentResultText(agentResult);',
             '  const nextMessages = Array.isArray(agentResult?.messages) ? agentResult.messages : state.conversation_messages;',
-            `  return { ...state, last_agent: ${JSON.stringify(node.data?.label || 'Agent')}, result: completion, systemPrompt, conversation_messages: nextMessages };`,
+            '  const previousValue = state?.[outputStateKey];',
+            '  const nextValue = (() => {',
+            "    if (outputStateKey === 'conversation_messages') {",
+            "      if (outputWriteMode === 'replace') return [{ role: 'assistant', content: completion }];",
+            '      return Array.isArray(nextMessages)',
+            '        ? nextMessages',
+            "        : [{ role: 'assistant', content: completion }];",
+            '    }',
+            "    if (outputWriteMode === 'replace') return completion;",
+            '    if (Array.isArray(previousValue)) return previousValue.concat(completion);',
+            "    if (typeof previousValue === 'string' && previousValue) return `${previousValue}\\n${completion}`;",
+            "    if (previousValue == null || previousValue === '') return completion;",
+            '    return [previousValue, completion];',
+            '  })();',
+            `  return { ...state, last_agent: ${JSON.stringify(node.data?.label || 'Agent')}, [outputStateKey]: nextValue, result: completion, systemPrompt, conversation_messages: nextMessages };`,
             '};',
             '',
           ].join('\n');
@@ -1812,6 +1924,44 @@ function FlowBuilder() {
 
     return '';
   }, []);
+  const getTextFromStateValue = useCallback((value) => {
+    if (typeof value === 'string') {
+      return value.trim();
+    }
+    if (Array.isArray(value)) {
+      const lastItem = value[value.length - 1];
+      if (typeof lastItem === 'string') {
+        return lastItem.trim();
+      }
+      if (lastItem && typeof lastItem === 'object') {
+        const content = lastItem.content;
+        if (typeof content === 'string') {
+          return content.trim();
+        }
+        if (Array.isArray(content)) {
+          return content
+            .map((part) =>
+              typeof part?.text === 'string'
+                ? part.text
+                : typeof part === 'string'
+                  ? part
+                  : ''
+            )
+            .filter(Boolean)
+            .join('\n')
+            .trim();
+        }
+      }
+      return '';
+    }
+    if (value && typeof value === 'object') {
+      const content = value.content;
+      if (typeof content === 'string') {
+        return content.trim();
+      }
+    }
+    return '';
+  }, []);
 
   const startAgentForPreview = findStartAgent();
   const startInputForPreview = findStartInputNode();
@@ -2072,7 +2222,12 @@ function FlowBuilder() {
         conversation_messages: conversationMessages,
       });
 
-      assistantText = String(finalState?.result || '').trim();
+      const agentOutputKey = String(startAgent?.data?.outputStateKey || 'result').trim() || 'result';
+      const rawAssistantValue = finalState?.[agentOutputKey];
+      assistantText =
+        getTextFromStateValue(rawAssistantValue) ||
+        getTextFromStateValue(finalState?.result) ||
+        String(finalState?.result || '').trim();
       if (!assistantText) {
         throw new Error('未取得語言模型回覆。請確認 API Key、模型設定與節點連線。');
       }
@@ -2096,14 +2251,33 @@ function FlowBuilder() {
     generateLangGraphCode,
     generateLangGraphJsCode,
     getResponseText,
+    getTextFromStateValue,
     startInputForPreview,
   ]);
 
   return (
-    <div className="builder-layout">
-      <aside className="sidebar">
-        <h1>ChihFlow</h1>
-        <p>把節點拖曳到畫布上，建立你的 Agent 流程。</p>
+    <div
+      className={`builder-layout${isSidebarCollapsed ? ' sidebar-collapsed' : ''}${isSettingsCollapsed ? ' settings-collapsed' : ''}`}
+    >
+      <aside className={`sidebar${isSidebarCollapsed ? ' collapsed' : ''}`}>
+        <div className="panel-header">
+          <div>
+            {isSidebarCollapsed && <div className="collapsed-brand">ChihFlow</div>}
+            {!isSidebarCollapsed && <h1>ChihFlow</h1>}
+            {!isSidebarCollapsed && <p>把節點拖曳到畫布上，建立你的 Agent 流程。</p>}
+          </div>
+          <button
+            type="button"
+            className="panel-toggle"
+            onClick={() => setIsSidebarCollapsed((prev) => !prev)}
+            aria-label={isSidebarCollapsed ? '展開 ChihFlow 面板' : '收合 ChihFlow 面板'}
+            title={isSidebarCollapsed ? '展開' : '收合'}
+          >
+            {isSidebarCollapsed ? '>' : '<'}
+          </button>
+        </div>
+
+        {!isSidebarCollapsed && <div className="sidebar-scroll">
         <div className="node-palette">
           {nodePalette.map((node) =>
             node.type === 'condition' ? (
@@ -2239,6 +2413,7 @@ function FlowBuilder() {
           </button>
           {runnerError && <p className="runner-error">{runnerError}</p>}
         </div>
+        </div>}
       </aside>
 
       <main className="canvas-wrap" ref={wrapperRef}>
@@ -2257,14 +2432,26 @@ function FlowBuilder() {
           fitView
         >
           <Background gap={16} size={1} color="#d4d4d8" />
-          <Controls />
-          <MiniMap nodeColor="#52525b" />
+          <Controls position="bottom-right" />
+          <MiniMap nodeColor={getMiniMapNodeColor} position="bottom-left" />
         </ReactFlow>
       </main>
 
-      <aside className="settings-panel">
-        <h2>節點設定</h2>
+      <aside className={`settings-panel${isSettingsCollapsed ? ' collapsed' : ''}`}>
+        <div className="panel-header">
+          {!isSettingsCollapsed && <h2>節點設定</h2>}
+          <button
+            type="button"
+            className="panel-toggle"
+            onClick={() => setIsSettingsCollapsed((prev) => !prev)}
+            aria-label={isSettingsCollapsed ? '展開 Node Setting 面板' : '收合 Node Setting 面板'}
+            title={isSettingsCollapsed ? '展開' : '收合'}
+          >
+            {isSettingsCollapsed ? '<' : '>'}
+          </button>
+        </div>
 
+        {!isSettingsCollapsed && <div className="settings-scroll">
         {!selectedNode && <p>請先選擇一個節點進行設定。</p>}
 
         {selectedNode && (
@@ -2284,6 +2471,21 @@ function FlowBuilder() {
               節點類型
               <input type="text" value={selectedNode.data?.nodeType || ''} readOnly />
             </label>
+
+            <p className="settings-note">接收到的 State Keys</p>
+            <div className="start-key-list">
+              {getIncomingStateKeys(selectedNode.id).length > 0 ? (
+                getIncomingStateKeys(selectedNode.id).map((key, index) => (
+                  <div key={`incoming-state-key-${index}`} className="start-key-row">
+                    <input type="text" value={key} readOnly />
+                  </div>
+                ))
+              ) : (
+                <div className="start-key-row">
+                  <input type="text" value="無" readOnly />
+                </div>
+              )}
+            </div>
 
             {isStartNode && (
               <>
@@ -2404,6 +2606,31 @@ function FlowBuilder() {
                       updateNodeData(selectedNode.id, { agentPrompt: event.target.value })
                     }
                   />
+                </label>
+
+                <label>
+                  輸出 State Key
+                  <input
+                    type="text"
+                    placeholder="result"
+                    value={selectedNode.data?.outputStateKey || 'result'}
+                    onChange={(event) =>
+                      updateNodeData(selectedNode.id, { outputStateKey: event.target.value })
+                    }
+                  />
+                </label>
+
+                <label>
+                  寫入方式
+                  <select
+                    value={selectedNode.data?.outputWriteMode || 'append'}
+                    onChange={(event) =>
+                      updateNodeData(selectedNode.id, { outputWriteMode: event.target.value })
+                    }
+                  >
+                    <option value="append">append（預設）</option>
+                    <option value="replace">replace（覆蓋）</option>
+                  </select>
                 </label>
               </>
             )}
@@ -2617,6 +2844,7 @@ function FlowBuilder() {
             )}
           </div>
         )}
+        </div>}
       </aside>
 
       {errorDialogMessage && (
